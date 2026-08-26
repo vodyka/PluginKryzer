@@ -109,6 +109,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     fullOutboundOrders: [],
     fullOutboundLoaded: false,
     fullOutboundLoading: false,
+    fullSelectedOrderId: '',
     fullInventoryMap: null,
     fullPrintProgress: readJson(STORAGE_FULL_PROGRESS, {}),
   };
@@ -3465,22 +3466,43 @@ Isso NÃO chama mark-print novamente.`)) return;
   // Bipagem unitária: sempre 1 etiqueta por leitura. Consome a linha pendente
   // mais antiga daquele SKU entre todos os pedidos de saída Full (FIFO) — uma
   // leitura de código de barras não carrega contexto de qual pedido é.
-  async function handleFullScan(sku) {
-    const targetSku = normSku(sku);
-    if (!targetSku) { beep(false); focusScanner(); return; }
-    const candidates = [];
-    (state.fullOutboundOrders || []).forEach(order => {
-      (order.detailsVOList || []).forEach(detail => {
-        if (normSku(detail.sku) !== targetSku) return;
-        const rec = fullProgressForLine(detail.idStr || detail.id);
-        const remaining = Math.max(0, Number(detail.qty || 0) - fullPrintedTotal(rec));
-        if (remaining > 0) candidates.push({ order, detail });
-      });
-    });
-    candidates.sort((a, b) => String(a.order.createTime || '').localeCompare(String(b.order.createTime || '')));
-    const target = candidates[0];
-    if (!target) {
-      setMessage(`SKU ${targetSku} não tem saída manual Full pendente (ou já foi impresso por completo).`, 'error');
+  // Escopado ao pedido selecionado na lista à esquerda — sem isso não tem como
+  // saber pra qual saída manual um código bipado pertence (mesmo SKU pode
+  // aparecer em pedidos diferentes com progressos diferentes).
+  async function handleFullScan(rawCode) {
+    const scanned = normSku(rawCode);
+    if (!scanned) { beep(false); focusScanner(); return; }
+    const order = (state.fullOutboundOrders || []).find(o => String(o.idStr || o.id) === String(state.fullSelectedOrderId));
+    if (!order) {
+      setMessage('Selecione um pedido de saída manual à esquerda antes de bipar.', 'error');
+      beep(false); focusScanner(); return;
+    }
+    let targetSku = scanned;
+    let forcedListing = null;
+    try {
+      const invMap = await fetchFullInventoryMapCheckout();
+      const isKnownWarehouseSku = (order.detailsVOList || []).some(d => normSku(d.sku) === scanned);
+      if (!isKnownWarehouseSku) {
+        // Não bateu como SKU físico direto — tenta como código do próprio Full
+        // (inventoryId), já que a etiqueta impressa tem justamente esse código
+        // no código de barras e pode ser bipada de volta pra reimprimir/conferir.
+        for (const [sku, listings] of invMap.entries()) {
+          const hit = listings.find(l => normSku(l.inventoryId) === scanned);
+          if (hit) { targetSku = sku; forcedListing = hit; break; }
+        }
+      }
+    } catch (error) {
+      console.error('[KZ Checkout] full scan (resolver inventoryId):', error);
+    }
+    const detail = (order.detailsVOList || []).find(d => normSku(d.sku) === targetSku);
+    if (!detail) {
+      setMessage(`${scanned} não está nesse pedido de saída manual.`, 'error');
+      beep(false); focusScanner(); return;
+    }
+    const rec = fullProgressForLine(detail.idStr || detail.id);
+    const remaining = Math.max(0, Number(detail.qty || 0) - fullPrintedTotal(rec));
+    if (remaining <= 0) {
+      setMessage(`${targetSku} já está 100% impresso nesse pedido.`, 'warn');
       beep(false); focusScanner(); return;
     }
     try {
@@ -3490,16 +3512,15 @@ Isso NÃO chama mark-print novamente.`)) return;
         setMessage(`SKU ${targetSku} não tem vínculo no Full. Etiqueta não impressa.`, 'error');
         beep(false); focusScanner(); return;
       }
-      let chosen = matches[0];
-      if (matches.length > 1) {
+      let chosen = forcedListing || matches[0];
+      if (!forcedListing && matches.length > 1) {
         const picked = await chooseFullInventoryItemCheckout(matches, { allowSplit: false });
         if (!picked) { focusScanner(); return; }
         chosen = picked.item;
       }
-      const size = /chic\s*seek/i.test(target.order.warehouseName || '') ? fullSizeFromSku(target.detail.sku) : '';
+      const size = /chic\s*seek/i.test(order.warehouseName || '') ? fullSizeFromSku(detail.sku) : '';
       const ok = buildFullBarcodeLabelWindow([{ inventoryId: chosen.inventoryId, title: chosen.title, size, qty: 1 }]);
       if (!ok) { beep(false); focusScanner(); return; }
-      const rec = fullProgressForLine(target.detail.idStr || target.detail.id);
       rec.byListing[chosen.inventoryId] = Number(rec.byListing[chosen.inventoryId] || 0) + 1;
       saveFullProgressState();
       setMessage(`Etiqueta Full impressa: ${targetSku} → ${chosen.inventoryId}.`, 'success');
@@ -3551,24 +3572,50 @@ Isso NÃO chama mark-print novamente.`)) return;
     }
   }
 
+  function fullOrderSummary(order) {
+    const lines = order.detailsVOList || [];
+    const totalTarget = lines.reduce((s, d) => s + Number(d.qty || 0), 0);
+    const totalPrinted = lines.reduce((s, d) => s + fullPrintedTotal(fullProgressForLine(d.idStr || d.id)), 0);
+    return { totalTarget, totalPrinted, done: totalTarget > 0 && totalPrinted >= totalTarget };
+  }
+
+  // Lista de pedidos à esquerda (selecionável) + produtos do pedido
+  // selecionado no centro pra bipar — cada pedido é trabalhado por vez, sem
+  // ambiguidade de "qual pedido esse SKU bipado pertence".
   function renderFullOutboundPanel(panel) {
     panel.classList.remove('minimized');
     panel.classList.add('kzqc-fullscreen');
     const orders = state.fullOutboundOrders || [];
+    const selectedOrder = orders.find(o => String(o.idStr || o.id) === String(state.fullSelectedOrderId)) || null;
     const removedEntries = Object.entries(state.fullPrintProgress || {}).filter(([, rec]) => rec.removed);
-    const rows = orders.map(order => {
-      const lines = (order.detailsVOList || []).map(detail => {
+
+    const sidebarHtml = orders.length ? orders.map(order => {
+      const { totalTarget, totalPrinted, done } = fullOrderSummary(order);
+      const active = selectedOrder && String(selectedOrder.idStr || selectedOrder.id) === String(order.idStr || order.id);
+      return `<button type="button" class="kzqc-full-order-btn ${active ? 'active' : ''} ${done ? 'done' : ''}" data-order-id="${escapeHtml(order.idStr || order.id)}"><b>${escapeHtml(order.commonNo)}</b><span>${escapeHtml(order.warehouseName || '')}</span><em>${totalPrinted}/${totalTarget}</em></button>`;
+    }).join('') : '<div class="kzqc-empty">Nenhuma saída manual Full pendente.</div>';
+
+    const removedHtml = removedEntries.length ? `<div class="kzqc-full-removed"><h3>Itens removidos</h3>${removedEntries.map(([id, rec]) => `<div class="kzqc-full-line removed"><div class="kzqc-full-line-info"><b>${escapeHtml(rec.sku || '')}</b><small>${escapeHtml(rec.skuTitle || '')} · ${escapeHtml(rec.orderNo || '')}</small></div><div class="kzqc-full-progress">${fullPrintedTotal(rec)} impresso(s)</div><button type="button" class="kzqc-full-dismiss" data-dismiss-id="${escapeHtml(id)}">Dispensar</button></div>`).join('')}</div>` : '';
+
+    let centerHtml;
+    if (!selectedOrder) {
+      centerHtml = `<div class="kzqc-empty">Selecione um pedido de saída manual à esquerda pra começar a bipar.</div>`;
+    } else {
+      const lines = (selectedOrder.detailsVOList || []).map(detail => {
         const rec = fullProgressForLine(detail.idStr || detail.id);
         const printed = fullPrintedTotal(rec);
         const target = Number(detail.qty || 0);
         const done = printed >= target && target > 0;
-        return `<div class="kzqc-full-line ${done ? 'done' : ''}" data-order-id="${escapeHtml(order.idStr || order.id)}" data-detail-id="${escapeHtml(detail.idStr || detail.id)}">${detail.skuImage ? `<img src="${escapeHtml(detail.skuImage)}">` : '<span class="kzqc-full-noimg"></span>'}<div class="kzqc-full-line-info"><b>${escapeHtml(detail.sku)}</b><small>${escapeHtml(detail.skuTitle || '')}</small></div><div class="kzqc-full-progress">${printed}/${target}</div>${done ? '<span class="kzqc-full-done-badge">Concluído</span>' : '<button type="button" class="kzqc-full-mass-btn" data-mass-print>Imprimir em massa</button>'}</div>`;
+        return `<div class="kzqc-full-line ${done ? 'done' : ''}" data-detail-id="${escapeHtml(detail.idStr || detail.id)}">${detail.skuImage ? `<img src="${escapeHtml(detail.skuImage)}">` : '<span class="kzqc-full-noimg"></span>'}<div class="kzqc-full-line-info"><b>${escapeHtml(detail.sku)}</b><small>${escapeHtml(detail.skuTitle || '')}</small></div><div class="kzqc-full-progress">${printed}/${target}</div>${done ? '<span class="kzqc-full-done-badge">Concluído</span>' : '<button type="button" class="kzqc-full-mass-btn" data-mass-print>Imprimir em massa</button>'}</div>`;
       }).join('');
-      return `<section class="kzqc-full-order"><div class="kzqc-full-order-head"><b>${escapeHtml(order.commonNo)}</b><span>${escapeHtml(order.warehouseName || '')}</span></div><div class="kzqc-full-order-note">${escapeHtml(order.note || '')}</div>${lines}</section>`;
-    }).join('');
-    const removedHtml = removedEntries.length ? `<section class="kzqc-full-removed"><h3>Itens removidos do pedido</h3>${removedEntries.map(([id, rec]) => `<div class="kzqc-full-line removed"><div class="kzqc-full-line-info"><b>${escapeHtml(rec.sku || '')}</b><small>${escapeHtml(rec.skuTitle || '')} · ${escapeHtml(rec.orderNo || '')}</small></div><div class="kzqc-full-progress">${fullPrintedTotal(rec)} impresso(s) antes de remover</div><button type="button" class="kzqc-full-dismiss" data-dismiss-id="${escapeHtml(id)}">Dispensar</button></div>`).join('')}</section>` : '';
-    panel.innerHTML = `<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">K</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div></div><div class="kzqc-body kzqc-body-full"><main class="kzqc-main kzqc-full-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida · Full</div><h1>Escaneie o SKU para imprimir a etiqueta do Full</h1><p>Saídas manuais marcadas como Full, pendentes no armazém.</p></div><button type="button" id="kzqc-origin-toggle" class="kzqc-queue-chip kzqc-origin-toggle">Origem: Pedido Saída Manual [Full]</button><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.fullOutboundLoading ? 'disabled' : ''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card kzqc-full-list-card"><div class="kzqc-content-head"><div class="kzqc-content-title">Saídas manuais do Full pendentes</div><div class="kzqc-total-pill">${orders.length} pedido(s)</div><button type="button" id="kzqc-full-refresh" class="kzqc-side-action">Atualizar</button></div>${state.fullOutboundLoading ? '<div class="kzqc-empty">Carregando...</div>' : orders.length ? `<div class="kzqc-full-list">${rows}</div>` : '<div class="kzqc-empty">Nenhuma saída manual Full pendente.</div>'}${removedHtml}</section></main></div>`;
+      centerHtml = `<section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida · Full</div><h1>${escapeHtml(selectedOrder.commonNo)}</h1><p>${escapeHtml(selectedOrder.warehouseName || '')}${selectedOrder.note ? ` · ${escapeHtml(selectedOrder.note)}` : ''}</p></div><button type="button" id="kzqc-origin-toggle" class="kzqc-queue-chip kzqc-origin-toggle">Origem: Pedido Saída Manual [Full]</button><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU"><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-content-head"><div class="kzqc-content-title">Produtos deste pedido</div></div><div class="kzqc-full-list">${lines}</div></section>`;
+    }
 
+    panel.innerHTML = `<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">K</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div></div><div class="kzqc-body kzqc-body-full"><aside class="kzqc-full-sidebar"><div class="kzqc-full-sidebar-head"><b>Saídas Full</b><button type="button" id="kzqc-full-refresh" class="kzqc-side-action">Atualizar</button></div>${state.fullOutboundLoading ? '<div class="kzqc-empty">Carregando...</div>' : `<div class="kzqc-full-order-list">${sidebarHtml}</div>`}${removedHtml}</aside><main class="kzqc-main kzqc-full-main">${!selectedOrder && !state.fullOutboundLoading ? `<div class="kzqc-top-copy" style="margin-bottom:14px"><div class="kzqc-eyebrow">Leitura rápida · Full</div><button type="button" id="kzqc-origin-toggle" class="kzqc-queue-chip kzqc-origin-toggle">Origem: Pedido Saída Manual [Full]</button></div>` : ''}${state.fullOutboundLoading ? '<div class="kzqc-empty">Carregando...</div>' : centerHtml}</main></div>`;
+
+    panel.querySelectorAll('[data-order-id]').forEach(btn => {
+      btn.addEventListener('click', () => { state.fullSelectedOrderId = btn.dataset.orderId; scheduleRender(); });
+    });
     panel.querySelector('#kzqc-origin-toggle')?.addEventListener('click', () => { state.originMode = 'label'; scheduleRender(); });
     panel.querySelector('#kzqc-full-refresh')?.addEventListener('click', () => loadFullOutboundView(true));
     const scanner = panel.querySelector('#kzqc-scanner');
@@ -3582,11 +3629,11 @@ Isso NÃO chama mark-print novamente.`)) return;
         });
       }
     });
-    if (scanner && !state.fullOutboundLoading) scanner.focus();
+    if (scanner) scanner.focus();
     panel.querySelectorAll('[data-mass-print]').forEach(btn => {
       btn.addEventListener('click', () => {
-        const line = btn.closest('[data-order-id]');
-        printFullMass(line.dataset.orderId, line.dataset.detailId);
+        const line = btn.closest('[data-detail-id]');
+        printFullMass(selectedOrder.idStr || selectedOrder.id, line.dataset.detailId);
       });
     });
     panel.querySelectorAll('[data-dismiss-id]').forEach(btn => {
@@ -3621,13 +3668,17 @@ Isso NÃO chama mark-print novamente.`)) return;
     if (input) input.value = '';
     if (!rawCode) return;
 
+    // Modo Full tem sua própria resolução de código (SKU físico ou inventoryId
+    // do Full) — não passa pelo resolveScanToSku do fluxo normal, que depende
+    // de state.orders (vazio aqui) e faz uma chamada de rede pensada pra outro
+    // contexto, travando a leitura sem nunca resolver.
+    if (state.originMode === 'full') { await handleFullScan(rawCode); return; }
+
     setMessage(`Localizando ${rawCode}...`, 'info');
     const scannedCode = await resolveScanToSku(rawCode);
     if (scannedCode !== rawCode) {
       setMessage(`Código ${rawCode} identificado como SKU ${scannedCode}.`, 'success');
     }
-
-    if(state.originMode==='full'){await handleFullScan(scannedCode);return;}
 
     if (state.checkoutSession) {
       scanCheckoutItem(scannedCode);
@@ -4181,13 +4232,21 @@ Isso NÃO chama mark-print novamente.`)) return;
       #kzqc-error-flash{position:fixed;inset:0;z-index:2147483647;background:#ff0000;pointer-events:none;animation:kzqcErrorFlash .75s ease-in-out}
       @keyframes kzqcErrorFlash{0%{opacity:0}12%{opacity:.6}24%{opacity:0}36%{opacity:.6}48%{opacity:0}60%{opacity:.45}100%{opacity:0}}
       button.kzqc-origin-toggle{cursor:pointer;font:inherit;color:inherit}
-      #kzqc-panel.kzqc-fullscreen .kzqc-body.kzqc-body-full{grid-template-columns:1fr!important;overflow:auto!important;display:block!important}
-      .kzqc-full-main{padding:16px;overflow:auto;max-width:900px;margin:0 auto}
-      .kzqc-full-list-card{padding:14px}
-      .kzqc-full-list{display:flex;flex-direction:column;gap:12px;margin-top:10px}
-      .kzqc-full-order{border:1px solid #eee;border-radius:10px;padding:12px;background:#fafafa}
-      .kzqc-full-order-head{display:flex;justify-content:space-between;align-items:center;font-size:13px}
-      .kzqc-full-order-note{font-size:11px;color:#8c8c8c;margin:4px 0 10px;word-break:break-word}
+      #kzqc-panel.kzqc-fullscreen .kzqc-body.kzqc-body-full{grid-template-columns:280px minmax(0,1fr)!important;display:grid!important;overflow:hidden!important}
+      .kzqc-full-sidebar{overflow-y:auto;border-right:1px solid #eee;padding-right:14px}
+      .kzqc-full-sidebar-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+      .kzqc-full-sidebar-head b{font-size:13px}
+      .kzqc-full-order-list{display:flex;flex-direction:column;gap:8px}
+      .kzqc-full-order-btn{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;border:1px solid #eee;border-radius:8px;padding:10px;background:#fff;cursor:pointer}
+      .kzqc-full-order-btn:hover{background:#fafafa}
+      .kzqc-full-order-btn.active{border-color:#1677ff;background:#f0f5ff}
+      .kzqc-full-order-btn.done{opacity:.6}
+      .kzqc-full-order-btn b{font-size:12px}
+      .kzqc-full-order-btn span{font-size:10px;color:#8c8c8c}
+      .kzqc-full-order-btn em{font-style:normal;font-size:11px;font-weight:700;color:#595959;margin-top:3px}
+      .kzqc-full-order-btn.done em{color:#389e0d}
+      .kzqc-full-main{padding:0 0 0 20px;overflow:auto}
+      .kzqc-full-list{display:flex;flex-direction:column;gap:0;margin-top:10px;border:1px solid #f0f0f0;border-radius:6px;padding:0 12px}
       .kzqc-full-line{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #eee}
       .kzqc-full-line:first-of-type{border-top:0}
       .kzqc-full-line img,.kzqc-full-noimg{width:38px;height:38px;object-fit:contain;border-radius:6px;background:#f0f0f0;flex:0 0 auto}

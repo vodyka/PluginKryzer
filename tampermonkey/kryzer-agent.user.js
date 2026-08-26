@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.9.3
+// @version      2.10.0
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.9.3
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.9.3
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.9.3
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.0
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,18 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.9.3) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.10.0) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.10.0 (2026-08-26): checkout.js — corrige e redesenha o modo Full:
+// (1) bug crítico: o desvio pro modo Full rodava DEPOIS do resolveScanToSku
+// do fluxo normal, que depende de pedidos que não existem nesse modo e
+// travava a leitura em "Localizando..." pra sempre; agora o modo Full desvia
+// antes de tudo isso. (2) Layout novo: lista de pedidos de saída Full à
+// esquerda (seleciona um), produtos desse pedido pra bipar no centro — cada
+// pedido é trabalhado por vez, sem ambiguidade de qual pedido um SKU bipado
+// pertence. (3) A leitura agora também reconhece o código do próprio Full
+// (inventoryId) bipado direto, além do SKU físico do armazém.
 // v2.9.3 (2026-08-26): checkout.js — mesmos 3 ajustes do v2.9.2 aplicados na
 // etiqueta do Full do modo "Pedido Saída Manual [Full]" (mesmo defeito, mesma
 // API de barcode): &showhrt=false, código de barras maior, letra de tamanho
