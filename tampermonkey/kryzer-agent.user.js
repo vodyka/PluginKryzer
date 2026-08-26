@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.7.0
+// @version      2.7.1
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.7.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.7.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.7.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.7.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.7.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.7.1
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,16 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.7.0) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.7.1) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.7.1 (2026-08-26): checkout.js — corrige duplicação de quantidade em
+// componente real de kit quando o SKU do anúncio (orderItemList[].productSku)
+// coincide com o SKU de um dos componentes reais do kit. A exclusão do "item
+// misto" agora casa por orderItemId (estável) em vez de comparar SKUs (o
+// código interno do kit no groupVOS, ex. "KT87455", pode ser bem diferente
+// do SKU configurado no anúncio pro mesmo item, ex. "14302"). Motivo real:
+// pedido UPY71196938, componente 14302 x1 aparecia como x2.
 // v2.7.0 (2026-08-26): alerta-venda.js — dois toggles novos no menu do
 // Tampermonkey (ícone da extensão → seta ao lado de "Kryzer Agent"):
 // "Popup de vendas" (card na tela + notificação nativa) e "Alerta sonoro de

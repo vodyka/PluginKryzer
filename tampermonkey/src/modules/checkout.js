@@ -1316,7 +1316,14 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         })).filter(row => row.sku);
 
         if (rows.length) {
-          found.push({ rows, path: `${path}.groupVOS`, commercialSku });
+          // orderItemId é a chave confiável pra saber "este item do pedido já foi
+          // resolvido aqui" — o SKU comercial (acima) não serve pra isso: o código
+          // interno do kit no groupVOS (ex.: "KT87455") pode ser diferente do SKU
+          // configurado no anúncio pra esse mesmo item (ex.: "14302"), e pior, esse
+          // SKU do anúncio pode coincidir com o de um componente real do kit —
+          // nesse caso o filtro por SKU falha e duplica quantidade em vez de excluir.
+          const orderItemId = norm(node?.orderItemId || node?.orderItemIdStr || '');
+          found.push({ rows, path: `${path}.groupVOS`, commercialSku, orderItemId });
         }
       }
 
@@ -1350,6 +1357,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         skuPaths: summary.rows.map(() => 'varSku'),
         exactGroupVOS: true,
         commercialSkus: [...new Set(found.map(entry => entry.commercialSku).filter(Boolean))],
+        resolvedOrderItemIds: [...new Set(found.map(entry => entry.orderItemId).filter(Boolean))],
       },
     };
   }
@@ -1480,6 +1488,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       title: getItemTitle(item),
       image: getItemImage(item),
       scanAliases: mergeScanAliases(getBestSku(item), collectBarcodeCandidates(item)),
+      orderItemId: norm(item?.id || item?.idStr || ''),
     })).filter(item => item.sku);
   }
 
@@ -1534,10 +1543,20 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     const fallbackItems = fallbackMarketplaceItems(order);
 
     // Pedido misto: o detalhe pode trazer somente groupVOS do kit. Soma os itens
-    // simples do pedido e remove apenas a linha comercial do kit identificada no detalhe.
+    // simples do pedido e remove apenas a linha do kit já resolvida no detalhe.
     if (realResult?.meta?.exactGroupVOS) {
+      // Exclui por orderItemId (não por SKU): o código interno do kit no groupVOS
+      // (ex.: "KT87455") pode ser diferente do SKU configurado no anúncio pra esse
+      // mesmo item (ex.: "14302") — e pior, esse SKU do anúncio pode coincidir com
+      // o de um componente real do kit. Filtrar por SKU nesse caso não exclui nada
+      // e ainda SOMA quantidade em cima do componente real (bug confirmado: pedido
+      // UPY71196938, componente real 14302 x1 virou 14302 x2 porque o SKU do
+      // anúncio também era "14302"). orderItemId é estável nos dois lados.
+      const resolvedOrderItemIds = new Set((realResult.meta.resolvedOrderItemIds || []).map(norm));
       const kitCommercialSkus = new Set((realResult.meta.commercialSkus || []).map(normSku));
-      const simpleRows = fallbackItems.filter(item => !kitCommercialSkus.has(normSku(item.sku)));
+      const simpleRows = fallbackItems.filter(item =>
+        !resolvedOrderItemIds.has(norm(item.orderItemId)) && !kitCommercialSkus.has(normSku(item.sku))
+      );
       realItems = [...realItems, ...simpleRows];
       appLog('info', 'pedido_misto_expandido', { pedido: orderNo || idStr, componentesKit: realResult.rows?.length || 0, itensSimples: simpleRows.length });
     }
