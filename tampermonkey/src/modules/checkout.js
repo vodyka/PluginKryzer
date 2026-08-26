@@ -46,6 +46,7 @@ function initCheckoutModule() {
 const STORAGE_BULK_MASS_PRINT = 'kz_quick_checkout_bulk_mass_v1';
 const STORAGE_QTY_SCAN_CONFIRM = 'kz_quick_checkout_qty_scan_confirm_v1';
 const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
+const STORAGE_FULL_PROGRESS = 'kz_quick_checkout_full_progress_v1';
 
   const CHANNELS = [
     { id: 'shopee', label: 'Shopee' },
@@ -104,6 +105,12 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
 bulkMassPrintEnabled: readJson(STORAGE_BULK_MASS_PRINT, true) !== false,
 qtyScanConfirmEnabled: readJson(STORAGE_QTY_SCAN_CONFIRM, false) === true,
 stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
+    originMode: 'label',
+    fullOutboundOrders: [],
+    fullOutboundLoaded: false,
+    fullOutboundLoading: false,
+    fullInventoryMap: null,
+    fullPrintProgress: readJson(STORAGE_FULL_PROGRESS, {}),
   };
 
   let bridgeInstalled = false;
@@ -3279,6 +3286,318 @@ Isso NÃO chama mark-print novamente.`)) return;
     setTimeout(() => { input.focus(); input.select(); }, 50);
   }
 
+  // ===========================================================================
+  // MODO "Origem: Pedido Saída Manual [Full]" — fonte de dados totalmente
+  // separada do fluxo normal (etiqueta não impressa). Lê saídas manuais de
+  // estoque (/api/warehouse-inout-list/out-list, status "0" = pendente/
+  // processando) marcadas como Full via a palavra "full" em algum lugar do
+  // campo note (confirmado por captura de rede real — não existe uma tag/flag
+  // dedicada). Imprime etiqueta com código de barras (Code128, via TEC-IT,
+  // mesma estratégia de imagem-por-URL já usada no compras.js) do inventoryId
+  // do Full em vez da etiqueta de envio via plugin.
+  // ===========================================================================
+
+  const KZ_FULL_SIZE_MAP = { '00': 'PP', '02': 'P', '04': 'M', '06': 'G', '08': 'GG' };
+  function fullSizeFromSku(sku) { return KZ_FULL_SIZE_MAP[String(sku || '').slice(-2)] || ''; }
+
+  function saveFullProgressState() { saveJson(STORAGE_FULL_PROGRESS, state.fullPrintProgress); }
+
+  function fullProgressForLine(id) {
+    id = String(id || '');
+    if (!state.fullPrintProgress[id]) state.fullPrintProgress[id] = { target: 0, byListing: {}, removed: false };
+    return state.fullPrintProgress[id];
+  }
+
+  function fullPrintedTotal(rec) {
+    return Object.values(rec?.byListing || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+  }
+
+  // Casa o cache de progresso (chaveado pelo ID da linha do pedido, estável
+  // entre edições) contra a lista atual — linha que sumiu vira "removida" sem
+  // perder a contagem já impressa; linha que reaparece some da lista de
+  // removidos; quantidade-alvo atualiza se o pedido foi editado.
+  function reconcileFullProgress(orders) {
+    const liveIds = new Set();
+    (orders || []).forEach(order => {
+      (order.detailsVOList || []).forEach(detail => {
+        const id = String(detail.idStr || detail.id || '');
+        if (!id) return;
+        liveIds.add(id);
+        const rec = fullProgressForLine(id);
+        rec.target = Number(detail.qty || 0);
+        rec.removed = false;
+        rec.sku = detail.sku;
+        rec.skuTitle = detail.skuTitle;
+        rec.orderNo = order.commonNo;
+        rec.warehouseName = order.warehouseName;
+      });
+    });
+    Object.keys(state.fullPrintProgress).forEach(id => {
+      if (!liveIds.has(id) && !state.fullPrintProgress[id].removed) {
+        state.fullPrintProgress[id].removed = true;
+      }
+    });
+    saveFullProgressState();
+  }
+
+  async function fetchFullOutboundOrders(force = false) {
+    if (state.fullOutboundLoaded && !force) return state.fullOutboundOrders;
+    const all = [];
+    let pageNum = 1, total = Infinity;
+    while (all.length < total) {
+      const { json } = await postJson('/api/warehouse-inout-list/out-list', { pageSize: 50, pageNum, status: '0' });
+      if (!isSuccess(json)) throw new Error(json?.msg || 'Falha ao listar saídas manuais.');
+      const list = json?.data?.list || [];
+      total = Number(json?.data?.total || list.length);
+      all.push(...list);
+      if (!list.length || list.length < 50 || pageNum > 200) break;
+      pageNum++;
+    }
+    const fullOrders = all.filter(o => /full/i.test(o?.note || ''));
+    state.fullOutboundOrders = fullOrders;
+    state.fullOutboundLoaded = true;
+    reconcileFullProgress(fullOrders);
+    return fullOrders;
+  }
+
+  // /api/full-inventory/list não filtra por SKU (confirmado por captura de
+  // rede) — pagina tudo nos dois status com vínculo confirmado (um produto
+  // pode desativar o Full e ainda manter o SKU vinculado) e monta um mapa por
+  // itemSku. Mesma estratégia já usada em compras.js, replicada aqui porque
+  // os módulos não compartilham escopo entre si.
+  async function fetchFullInventoryMapCheckout(force = false) {
+    if (state.fullInventoryMap && !force) return state.fullInventoryMap;
+    const statuses = ['all_full', 'recommended_to_full'];
+    const rows = (await Promise.all(statuses.map(async fullStatus => {
+      const all = [];
+      let pageNum = 1, total = Infinity;
+      while (all.length < total) {
+        const { json } = await postJson('/api/full-inventory/list', { sortName: '1', sortValue: '1', pageNum, pageSize: 50, fullStatus });
+        if (!isSuccess(json)) throw new Error(json?.msg || 'Falha ao consultar produtos do Full.');
+        const list = json?.data?.list || [];
+        total = Number(json?.data?.total || list.length);
+        all.push(...list);
+        if (!list.length || list.length < 50 || pageNum > 200) break;
+        pageNum++;
+      }
+      return all;
+    }))).flat();
+    const map = new Map();
+    rows.forEach(r => {
+      const sku = normSku(r.itemSku);
+      if (!sku) return;
+      if (!map.has(sku)) map.set(sku, []);
+      map.get(sku).push(r);
+    });
+    state.fullInventoryMap = map;
+    return map;
+  }
+
+  async function loadFullOutboundView(force = false) {
+    state.fullOutboundLoading = true;
+    scheduleRender();
+    try {
+      await Promise.all([fetchFullOutboundOrders(force), fetchFullInventoryMapCheckout(force)]);
+      setMessage(`${state.fullOutboundOrders.length} saída(s) manual(is) do Full carregada(s).`, 'success');
+    } catch (error) {
+      console.error('[KZ Checkout] full outbound:', error);
+      setMessage(error.message || String(error), 'error');
+    } finally {
+      state.fullOutboundLoading = false;
+      scheduleRender();
+    }
+  }
+
+  // Modal de escolha quando o SKU tem 2+ anúncios vinculados no Full. Modo
+  // simples: escolhe um só (usado na bipagem unitária). Modo divisão (só
+  // oferecido na impressão em massa): distribui a quantidade entre os
+  // anúncios, ex. 40 pra cada um dos dois que compartilham o mesmo SKU.
+  function chooseFullInventoryItemCheckout(candidates, { allowSplit = false, totalQty = 1 } = {}) {
+    return new Promise(resolve => {
+      const b = document.createElement('div');
+      b.className = 'kzqc-modal-backdrop';
+      const pickHtml = `<div class="kzqc-full-pick-list">${candidates.map((c, idx) => `<button type="button" class="kzqc-full-pick-btn" data-idx="${idx}">${c.mainImage ? `<img src="${escapeHtml(c.mainImage)}">` : '<span class="kzqc-full-noimg"></span>'}<span><b>${escapeHtml(c.inventoryId)}</b><small>${escapeHtml(c.title || '')}</small></span></button>`).join('')}</div>`;
+      const splitHtml = allowSplit ? `<button type="button" class="kzqc-side-action" id="kzqc-full-split-mode" style="width:100%;margin-top:8px">Dividir quantidade entre eles</button><div class="kzqc-full-split" style="display:none"><p>Quantidade pra cada anúncio (soma precisa bater com ${totalQty}):</p>${candidates.map((c, idx) => `<div class="kzqc-full-split-row"><b>${escapeHtml(c.inventoryId)}</b><small>${escapeHtml(c.title || '')}</small><input type="number" min="0" value="0" data-split-idx="${idx}"></div>`).join('')}<div class="kzqc-full-split-total">Total: <span id="kzqc-full-split-sum">0</span>/${totalQty}</div><button type="button" class="primary" id="kzqc-full-split-confirm" disabled>Confirmar divisão</button></div>` : '';
+      b.innerHTML = `<div class="kzqc-modal kzqc-modal-small"><div class="kzqc-modal-head"><h3>Qual produto do Full?</h3><button class="kzqc-icon-btn" data-action="cancel">×</button></div><div class="kzqc-modal-body">${pickHtml}${splitHtml}</div><div class="kzqc-modal-actions"><button data-action="cancel">Cancelar</button></div></div>`;
+      document.body.appendChild(b);
+      const closeWith = result => { b.remove(); resolve(result); };
+      b.querySelectorAll('[data-idx]').forEach(btn => {
+        btn.addEventListener('click', () => closeWith({ mode: 'single', item: candidates[Number(btn.dataset.idx)] }));
+      });
+      b.querySelector('[data-action="cancel"]')?.addEventListener('click', () => closeWith(null));
+      b.querySelector('#kzqc-full-split-mode')?.addEventListener('click', () => {
+        b.querySelector('.kzqc-full-pick-list').style.display = 'none';
+        b.querySelector('#kzqc-full-split-mode').style.display = 'none';
+        b.querySelector('.kzqc-full-split').style.display = 'block';
+      });
+      const recomputeSum = () => {
+        const inputs = [...b.querySelectorAll('[data-split-idx]')];
+        const sum = inputs.reduce((s, i) => s + Math.max(0, parseInt(i.value, 10) || 0), 0);
+        const sumEl = b.querySelector('#kzqc-full-split-sum');
+        if (sumEl) sumEl.textContent = String(sum);
+        const confirmBtn = b.querySelector('#kzqc-full-split-confirm');
+        if (confirmBtn) confirmBtn.disabled = sum !== totalQty || sum === 0;
+      };
+      b.querySelectorAll('[data-split-idx]').forEach(inp => inp.addEventListener('input', recomputeSum));
+      b.querySelector('#kzqc-full-split-confirm')?.addEventListener('click', () => {
+        const inputs = [...b.querySelectorAll('[data-split-idx]')];
+        const allocations = inputs.map(i => ({ item: candidates[Number(i.dataset.splitIdx)], qty: Math.max(0, parseInt(i.value, 10) || 0) })).filter(a => a.qty > 0);
+        closeWith({ mode: 'split', allocations });
+      });
+    });
+  }
+
+  function buildFullBarcodeLabelWindow(items) {
+    const barcode = value => `https://barcode.tec-it.com/barcode.ashx?data=${encodeURIComponent(value)}&code=Code128&dpi=200`;
+    let labels = '';
+    items.forEach(item => {
+      for (let i = 0; i < Math.max(1, Number(item.qty || 1)); i++) {
+        labels += `<article class="full-label"><div class="full-size">${escapeHtml(item.size || '')}</div><img class="full-barcode" src="${barcode(item.inventoryId)}"><div class="full-id">${escapeHtml(item.inventoryId)}</div><div class="full-title">${escapeHtml(item.title || '')}</div></article>`;
+      }
+    });
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Etiquetas Full</title><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:100mm;font-family:Arial}.sheet{display:grid;grid-template-columns:repeat(2,50mm);width:100mm}.full-label{position:relative;width:50mm;height:25mm;display:flex;flex-direction:column;justify-content:center;gap:0;padding:1mm 1.5mm;overflow:hidden;page-break-inside:avoid}.full-barcode{width:90%;height:9mm;object-fit:contain;align-self:center}.full-id{font-weight:900;font-size:8pt;text-align:center;letter-spacing:.3px;margin-top:.3mm}.full-title{font-weight:700;font-size:6.5pt;line-height:1.05;text-align:center;word-break:break-word;margin-top:.3mm}.full-size{position:absolute;top:.8mm;right:1.2mm;font-size:13pt;font-weight:900;line-height:1}@page{size:100mm 25mm;margin:0}</style></head><body><main class="sheet">${labels}</main><script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) { setMessage('O navegador bloqueou a impressão.', 'error'); return false; }
+    w.document.open(); w.document.write(html); w.document.close();
+    return true;
+  }
+
+  // Bipagem unitária: sempre 1 etiqueta por leitura. Consome a linha pendente
+  // mais antiga daquele SKU entre todos os pedidos de saída Full (FIFO) — uma
+  // leitura de código de barras não carrega contexto de qual pedido é.
+  async function handleFullScan(sku) {
+    const targetSku = normSku(sku);
+    if (!targetSku) { beep(false); focusScanner(); return; }
+    const candidates = [];
+    (state.fullOutboundOrders || []).forEach(order => {
+      (order.detailsVOList || []).forEach(detail => {
+        if (normSku(detail.sku) !== targetSku) return;
+        const rec = fullProgressForLine(detail.idStr || detail.id);
+        const remaining = Math.max(0, Number(detail.qty || 0) - fullPrintedTotal(rec));
+        if (remaining > 0) candidates.push({ order, detail });
+      });
+    });
+    candidates.sort((a, b) => String(a.order.createTime || '').localeCompare(String(b.order.createTime || '')));
+    const target = candidates[0];
+    if (!target) {
+      setMessage(`SKU ${targetSku} não tem saída manual Full pendente (ou já foi impresso por completo).`, 'error');
+      beep(false); focusScanner(); return;
+    }
+    try {
+      const invMap = await fetchFullInventoryMapCheckout();
+      const matches = invMap.get(targetSku) || [];
+      if (!matches.length) {
+        setMessage(`SKU ${targetSku} não tem vínculo no Full. Etiqueta não impressa.`, 'error');
+        beep(false); focusScanner(); return;
+      }
+      let chosen = matches[0];
+      if (matches.length > 1) {
+        const picked = await chooseFullInventoryItemCheckout(matches, { allowSplit: false });
+        if (!picked) { focusScanner(); return; }
+        chosen = picked.item;
+      }
+      const size = fullSizeFromSku(target.detail.sku);
+      const ok = buildFullBarcodeLabelWindow([{ inventoryId: chosen.inventoryId, title: chosen.title, size, qty: 1 }]);
+      if (!ok) { beep(false); focusScanner(); return; }
+      const rec = fullProgressForLine(target.detail.idStr || target.detail.id);
+      rec.byListing[chosen.inventoryId] = Number(rec.byListing[chosen.inventoryId] || 0) + 1;
+      saveFullProgressState();
+      setMessage(`Etiqueta Full impressa: ${targetSku} → ${chosen.inventoryId}.`, 'success');
+      beep(true);
+      scheduleRender();
+    } catch (error) {
+      console.error('[KZ Checkout] full scan:', error);
+      setMessage(error.message || String(error), 'error');
+      beep(false);
+    }
+    focusScanner();
+  }
+
+  // Impressão em massa: imprime de uma vez tudo que falta de uma linha
+  // específica do pedido. Com 2+ anúncios vinculados, oferece dividir a
+  // quantidade entre eles em vez de jogar tudo num só.
+  async function printFullMass(orderIdStr, detailIdStr) {
+    const order = (state.fullOutboundOrders || []).find(o => String(o.idStr || o.id) === String(orderIdStr));
+    const detail = (order?.detailsVOList || []).find(d => String(d.idStr || d.id) === String(detailIdStr));
+    if (!order || !detail) return;
+    const rec = fullProgressForLine(detail.idStr || detail.id);
+    const remaining = Math.max(0, Number(detail.qty || 0) - fullPrintedTotal(rec));
+    if (remaining <= 0) { setMessage('Esse item já está 100% impresso.', 'warn'); return; }
+    const sku = normSku(detail.sku);
+    const size = fullSizeFromSku(detail.sku);
+    try {
+      setMessage(`Consultando vínculo Full de ${sku}...`, 'info');
+      const invMap = await fetchFullInventoryMapCheckout();
+      const matches = invMap.get(sku) || [];
+      if (!matches.length) { setMessage(`SKU ${sku} não tem vínculo no Full.`, 'error'); beep(false); return; }
+      let allocations = [{ item: matches[0], qty: remaining }];
+      if (matches.length > 1) {
+        const picked = await chooseFullInventoryItemCheckout(matches, { allowSplit: true, totalQty: remaining });
+        if (!picked) return;
+        allocations = picked.mode === 'split' ? picked.allocations : [{ item: picked.item, qty: remaining }];
+      }
+      const items = allocations.map(a => ({ inventoryId: a.item.inventoryId, title: a.item.title, size, qty: a.qty }));
+      const ok = buildFullBarcodeLabelWindow(items);
+      if (!ok) { beep(false); return; }
+      allocations.forEach(a => { rec.byListing[a.item.inventoryId] = Number(rec.byListing[a.item.inventoryId] || 0) + a.qty; });
+      saveFullProgressState();
+      setMessage(`${remaining} etiqueta(s) Full impressa(s) para ${sku}.`, 'success');
+      beep(true);
+      scheduleRender();
+    } catch (error) {
+      console.error('[KZ Checkout] full mass print:', error);
+      setMessage(error.message || String(error), 'error');
+      beep(false);
+    }
+  }
+
+  function renderFullOutboundPanel(panel) {
+    panel.classList.remove('minimized');
+    panel.classList.add('kzqc-fullscreen');
+    const orders = state.fullOutboundOrders || [];
+    const removedEntries = Object.entries(state.fullPrintProgress || {}).filter(([, rec]) => rec.removed);
+    const rows = orders.map(order => {
+      const lines = (order.detailsVOList || []).map(detail => {
+        const rec = fullProgressForLine(detail.idStr || detail.id);
+        const printed = fullPrintedTotal(rec);
+        const target = Number(detail.qty || 0);
+        const done = printed >= target && target > 0;
+        return `<div class="kzqc-full-line ${done ? 'done' : ''}" data-order-id="${escapeHtml(order.idStr || order.id)}" data-detail-id="${escapeHtml(detail.idStr || detail.id)}">${detail.skuImage ? `<img src="${escapeHtml(detail.skuImage)}">` : '<span class="kzqc-full-noimg"></span>'}<div class="kzqc-full-line-info"><b>${escapeHtml(detail.sku)}</b><small>${escapeHtml(detail.skuTitle || '')}</small></div><div class="kzqc-full-progress">${printed}/${target}</div>${done ? '<span class="kzqc-full-done-badge">Concluído</span>' : '<button type="button" class="kzqc-full-mass-btn" data-mass-print>Imprimir em massa</button>'}</div>`;
+      }).join('');
+      return `<section class="kzqc-full-order"><div class="kzqc-full-order-head"><b>${escapeHtml(order.commonNo)}</b><span>${escapeHtml(order.warehouseName || '')}</span></div><div class="kzqc-full-order-note">${escapeHtml(order.note || '')}</div>${lines}</section>`;
+    }).join('');
+    const removedHtml = removedEntries.length ? `<section class="kzqc-full-removed"><h3>Itens removidos do pedido</h3>${removedEntries.map(([id, rec]) => `<div class="kzqc-full-line removed"><div class="kzqc-full-line-info"><b>${escapeHtml(rec.sku || '')}</b><small>${escapeHtml(rec.skuTitle || '')} · ${escapeHtml(rec.orderNo || '')}</small></div><div class="kzqc-full-progress">${fullPrintedTotal(rec)} impresso(s) antes de remover</div><button type="button" class="kzqc-full-dismiss" data-dismiss-id="${escapeHtml(id)}">Dispensar</button></div>`).join('')}</section>` : '';
+    panel.innerHTML = `<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">K</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div></div><div class="kzqc-body"><main class="kzqc-main kzqc-full-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida · Full</div><h1>Escaneie o SKU para imprimir a etiqueta do Full</h1><p>Saídas manuais marcadas como Full, pendentes no armazém.</p></div><button type="button" id="kzqc-origin-toggle" class="kzqc-queue-chip kzqc-origin-toggle">Origem: Pedido Saída Manual [Full]</button><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.fullOutboundLoading ? 'disabled' : ''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card kzqc-full-list-card"><div class="kzqc-content-head"><div class="kzqc-content-title">Saídas manuais do Full pendentes</div><div class="kzqc-total-pill">${orders.length} pedido(s)</div><button type="button" id="kzqc-full-refresh" class="kzqc-side-action">Atualizar</button></div>${state.fullOutboundLoading ? '<div class="kzqc-empty">Carregando...</div>' : orders.length ? `<div class="kzqc-full-list">${rows}</div>` : '<div class="kzqc-empty">Nenhuma saída manual Full pendente.</div>'}${removedHtml}</section></main></div>`;
+
+    panel.querySelector('#kzqc-origin-toggle')?.addEventListener('click', () => { state.originMode = 'label'; scheduleRender(); });
+    panel.querySelector('#kzqc-full-refresh')?.addEventListener('click', () => loadFullOutboundView(true));
+    const scanner = panel.querySelector('#kzqc-scanner');
+    scanner?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleScan(scanner.value).catch(error => {
+          console.error('[KZ Checkout] erro full scan', error);
+          setMessage('Falha ao processar leitura.', 'error');
+          beep(false);
+        });
+      }
+    });
+    if (scanner && !state.fullOutboundLoading) scanner.focus();
+    panel.querySelectorAll('[data-mass-print]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const line = btn.closest('[data-order-id]');
+        printFullMass(line.dataset.orderId, line.dataset.detailId);
+      });
+    });
+    panel.querySelectorAll('[data-dismiss-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        delete state.fullPrintProgress[btn.dataset.dismissId];
+        saveFullProgressState();
+        scheduleRender();
+      });
+    });
+  }
+
   async function handleScan(value) {
     const input = document.getElementById('kzqc-scanner');
     const shortageMatch = String(value == null ? '' : value).trim().match(/^-\s*([^\s*]+)\s*\*\s*(\d+)\s*$/);
@@ -3307,6 +3626,8 @@ Isso NÃO chama mark-print novamente.`)) return;
     if (scannedCode !== rawCode) {
       setMessage(`Código ${rawCode} identificado como SKU ${scannedCode}.`, 'success');
     }
+
+    if(state.originMode==='full'){await handleFullScan(scannedCode);return;}
 
     if (state.checkoutSession) {
       scanCheckoutItem(scannedCode);
@@ -3859,6 +4180,38 @@ Isso NÃO chama mark-print novamente.`)) return;
       @media(max-width:640px){#kzqc-order-modal .kzqc-modal-card.kzqc-modal-wide{padding:18px!important}#kzqc-order-modal .kzqc-warehouse-rename-list label{grid-template-columns:1fr!important;gap:6px!important}}
       #kzqc-error-flash{position:fixed;inset:0;z-index:2147483647;background:#ff0000;pointer-events:none;animation:kzqcErrorFlash .75s ease-in-out}
       @keyframes kzqcErrorFlash{0%{opacity:0}12%{opacity:.6}24%{opacity:0}36%{opacity:.6}48%{opacity:0}60%{opacity:.45}100%{opacity:0}}
+      button.kzqc-origin-toggle{cursor:pointer;font:inherit;color:inherit}
+      .kzqc-full-main{padding:16px;overflow:auto}
+      .kzqc-full-list-card{padding:14px}
+      .kzqc-full-list{display:flex;flex-direction:column;gap:12px;margin-top:10px}
+      .kzqc-full-order{border:1px solid #eee;border-radius:10px;padding:12px;background:#fafafa}
+      .kzqc-full-order-head{display:flex;justify-content:space-between;align-items:center;font-size:13px}
+      .kzqc-full-order-note{font-size:11px;color:#8c8c8c;margin:4px 0 10px;word-break:break-word}
+      .kzqc-full-line{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #eee}
+      .kzqc-full-line:first-of-type{border-top:0}
+      .kzqc-full-line img,.kzqc-full-noimg{width:38px;height:38px;object-fit:contain;border-radius:6px;background:#f0f0f0;flex:0 0 auto}
+      .kzqc-full-line-info{flex:1;min-width:0}
+      .kzqc-full-line-info b{display:block;font-size:12px}
+      .kzqc-full-line-info small{display:block;font-size:10px;color:#8c8c8c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .kzqc-full-progress{font-size:12px;font-weight:700;color:#595959;white-space:nowrap}
+      .kzqc-full-line.done .kzqc-full-progress{color:#389e0d}
+      .kzqc-full-done-badge{font-size:10px;font-weight:700;color:#389e0d;background:#f6ffed;border:1px solid #b7eb8f;border-radius:999px;padding:3px 8px;white-space:nowrap}
+      .kzqc-full-mass-btn{font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid #d9d9d9;background:#fff;cursor:pointer;white-space:nowrap}
+      .kzqc-full-removed{margin-top:16px;border-top:1px dashed #d9d9d9;padding-top:12px}
+      .kzqc-full-removed h3{font-size:12px;color:#8c8c8c;margin:0 0 8px}
+      .kzqc-full-line.removed{opacity:.7}
+      .kzqc-full-dismiss{font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid #d9d9d9;background:#fff;cursor:pointer}
+      .kzqc-full-pick-list{display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto}
+      .kzqc-full-pick-btn{display:flex;align-items:center;gap:10px;padding:8px;border:1px solid #d9d9d9;border-radius:8px;background:#fff;cursor:pointer;text-align:left}
+      .kzqc-full-pick-btn img,.kzqc-full-pick-btn .kzqc-full-noimg{width:34px;height:34px;object-fit:contain;border-radius:6px;background:#f0f0f0;flex:0 0 auto}
+      .kzqc-full-pick-btn b{display:block;font-size:12px}
+      .kzqc-full-pick-btn small{display:block;font-size:10px;color:#8c8c8c}
+      .kzqc-full-split{margin-top:10px}
+      .kzqc-full-split-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee}
+      .kzqc-full-split-row b{font-size:11px;min-width:80px}
+      .kzqc-full-split-row small{flex:1;font-size:10px;color:#8c8c8c}
+      .kzqc-full-split-row input{width:64px;height:30px;border:1px solid #d9d9d9;border-radius:6px;text-align:center}
+      .kzqc-full-split-total{font-size:12px;font-weight:700;margin:8px 0}
 
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -3905,6 +4258,7 @@ Isso NÃO chama mark-print novamente.`)) return;
       panel.querySelector('#kzqc-open-fullscreen').onclick=()=>window.open('/pt/order/in-process?kzCheckout=1','_blank');
       return;
     }
+    if(state.originMode==='full'){renderFullOutboundPanel(panel);return;}
     const scannerWasFocused=document.activeElement?.id==='kzqc-scanner';
     const previousScannerValue=document.getElementById('kzqc-scanner')?.value||'';
     const previousListScroll=panel.querySelector('.kzqc-list')?.scrollTop||0;
@@ -3936,7 +4290,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     const warehouseOptions=[...new Set(state.orders.map(o=>o.warehouseName).filter(Boolean))].sort((a,b)=>warehouseDisplayName(a).localeCompare(warehouseDisplayName(b),'pt-BR'));
     const marketplaceChannels=availableChannels();
     const marketplaceOrderCount=marketplaceChannels.reduce((sum,channel)=>sum+channel.count,0);
-    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Múltiplos Itens</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Agrupar kits repetidos','Quando ligado, agrupa pedidos de kit idênticos e oferece imprimir tudo junto.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">Origem: Etiqueta não impressa</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.unknownPrint?.orderIds?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.unknownPrint.orderIds.length} pedido(s) com impressão sem confirmação</b><br>A etiqueta pode ter saído. Confira fisicamente antes de escolher.<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px"><button id="kzqc-unknown-mark">A etiqueta saiu — marcar</button><button id="kzqc-unknown-release" style="background:#64748b">A etiqueta não saiu — liberar</button></div></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
+    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Múltiplos Itens</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Agrupar kits repetidos','Quando ligado, agrupa pedidos de kit idênticos e oferece imprimir tudo junto.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><button type="button" id="kzqc-origin-toggle" class="kzqc-queue-chip kzqc-origin-toggle" title="Clique para trocar a fonte dos pedidos">Origem: Etiqueta não impressa</button><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.unknownPrint?.orderIds?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.unknownPrint.orderIds.length} pedido(s) com impressão sem confirmação</b><br>A etiqueta pode ter saído. Confira fisicamente antes de escolher.<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px"><button id="kzqc-unknown-mark">A etiqueta saiu — marcar</button><button id="kzqc-unknown-release" style="background:#64748b">A etiqueta não saiu — liberar</button></div></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
     const analysisWarning=panel.querySelector('#kzqc-analysis-warning');
     if(analysisWarning){
       analysisWarning.ondblclick=async()=>{
@@ -4014,6 +4368,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       bindSingleDoubleClick(btn,()=>showOrderAbnormalModal(order,sku),()=>{if(!state.checkoutSession)startCheckout(order);setTimeout(()=>handleScan(sku),40)});
     });
     panel.querySelector('#kzqc-cancel-checkout')?.addEventListener('click',cancelCheckout); panel.querySelector('#kzqc-session-abnormal')?.addEventListener('click',()=>{const orders=(state.checkoutSession?.orderIds||[]).map(findOrderById).filter(Boolean);state.checkoutSession=null;markOrdersAbnormal(orders)}); panel.querySelector('#kzqc-print-scanned-only')?.addEventListener('click',printOnlyScanned);
+    panel.querySelector('#kzqc-origin-toggle')?.addEventListener('click',()=>{state.originMode=state.originMode==='full'?'label':'full';if(state.originMode==='full')loadFullOutboundView();else scheduleRender();});
     panel.querySelector('#kzqc-refresh')?.addEventListener('click',()=>requestOrdersRefresh(true)); panel.querySelector('#kzqc-agent-refresh')?.addEventListener('click',refreshAgent); panel.querySelector('#kzqc-separation-order')?.addEventListener('click',showSeparationOrderModal); panel.querySelector('#kzqc-retry-mark')?.addEventListener('click',retryPendingMark); panel.querySelector('#kzqc-clear-print-blocks')?.addEventListener('click',clearAllPrintBlocks); panel.querySelector('#kzqc-system-logs')?.addEventListener('click',showSystemLogsModal);
     panel.querySelectorAll('.kzqc-overdue-row').forEach(b=>b.onclick=()=>{
       const order=findOrderById(b.dataset.orderId);

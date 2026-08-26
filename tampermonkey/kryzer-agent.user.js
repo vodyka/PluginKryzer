@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.8.0
+// @version      2.9.0
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.8.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.8.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.8.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.9.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.9.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.9.0
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,20 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.8.0) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.9.0) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.9.0 (2026-08-26): checkout.js — novo modo "Origem: Pedido Saída Manual
+// [Full]" (clique no chip "Origem" pra trocar). Lê saídas manuais de estoque
+// (/api/warehouse-inout-list/out-list, status pendente) marcadas com "full"
+// no note, em vez dos pedidos de etiqueta não impressa. Bipar um SKU imprime
+// 1 etiqueta do Full (código de barras Code128 via TEC-IT do inventoryId,
+// título do anúncio, tamanho grande); tem botão de imprimir em massa por
+// linha do pedido. Progresso impresso fica salvo por ID da linha do pedido
+// (sobrevive a editar quantidade; item removido do pedido continua mostrando
+// quanto tinha sido impresso). SKU com 2+ anúncios vinculados no Full: no
+// bipe unitário escolhe um; na impressão em massa também dá pra dividir a
+// quantidade entre os anúncios.
 // v2.8.0 (2026-08-26): compras.js — etiqueta do Full na aba Etiquetas. Novo
 // toggle "Imprimir etiqueta do Full": ao imprimir um SKU com produto vinculado
 // no Full (/api/full-inventory/list, status all_full + recommended_to_full,
