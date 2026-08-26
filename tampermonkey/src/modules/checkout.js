@@ -3415,11 +3415,12 @@ Isso NÃO chama mark-print novamente.`)) return;
   // anúncios, ex. 40 pra cada um dos dois que compartilham o mesmo SKU.
   function chooseFullInventoryItemCheckout(candidates, { allowSplit = false, totalQty = 1 } = {}) {
     return new Promise(resolve => {
+      document.getElementById('kzqc-modal')?.remove();
       const b = document.createElement('div');
-      b.className = 'kzqc-modal-backdrop';
+      b.id = 'kzqc-modal';
       const pickHtml = `<div class="kzqc-full-pick-list">${candidates.map((c, idx) => `<button type="button" class="kzqc-full-pick-btn" data-idx="${idx}">${c.mainImage ? `<img src="${escapeHtml(c.mainImage)}">` : '<span class="kzqc-full-noimg"></span>'}<span><b>${escapeHtml(c.inventoryId)}</b><small>${escapeHtml(c.title || '')}</small></span></button>`).join('')}</div>`;
       const splitHtml = allowSplit ? `<button type="button" class="kzqc-side-action" id="kzqc-full-split-mode" style="width:100%;margin-top:8px">Dividir quantidade entre eles</button><div class="kzqc-full-split" style="display:none"><p>Quantidade pra cada anúncio (soma precisa bater com ${totalQty}):</p>${candidates.map((c, idx) => `<div class="kzqc-full-split-row"><b>${escapeHtml(c.inventoryId)}</b><small>${escapeHtml(c.title || '')}</small><input type="number" min="0" value="0" data-split-idx="${idx}"></div>`).join('')}<div class="kzqc-full-split-total">Total: <span id="kzqc-full-split-sum">0</span>/${totalQty}</div><button type="button" class="primary" id="kzqc-full-split-confirm" disabled>Confirmar divisão</button></div>` : '';
-      b.innerHTML = `<div class="kzqc-modal kzqc-modal-small"><div class="kzqc-modal-head"><h3>Qual produto do Full?</h3><button class="kzqc-icon-btn" data-action="cancel">×</button></div><div class="kzqc-modal-body">${pickHtml}${splitHtml}</div><div class="kzqc-modal-actions"><button data-action="cancel">Cancelar</button></div></div>`;
+      b.innerHTML = `<div class="kzqc-modal-card"><div class="kzqc-modal-title">Qual produto do Full?</div>${pickHtml}${splitHtml}<div class="kzqc-modal-actions"><button data-action="cancel">Cancelar</button></div></div>`;
       document.body.appendChild(b);
       const closeWith = result => { b.remove(); resolve(result); };
       b.querySelectorAll('[data-idx]').forEach(btn => {
@@ -3448,6 +3449,26 @@ Isso NÃO chama mark-print novamente.`)) return;
     });
   }
 
+  // Confirmação pós-impressão (mesmo padrão do compras.js: pergunta se a
+  // etiqueta saiu certa antes de contar como impresso) — checkout.js não
+  // tinha um helper de confirmação genérico, então usa a mesma convenção
+  // #kzqc-modal/.kzqc-modal-card já usada pelos outros modais deste arquivo.
+  function confirmBoxCheckout(title, html, confirmText = 'Confirmar') {
+    return new Promise(resolve => {
+      document.getElementById('kzqc-modal')?.remove();
+      const modal = document.createElement('div');
+      modal.id = 'kzqc-modal';
+      modal.innerHTML = `<div class="kzqc-modal-card"><div class="kzqc-modal-title">${escapeHtml(title)}</div><div class="kzqc-modal-subtitle">${html}</div><div class="kzqc-modal-actions"><button data-action="cancel">Cancelar</button><button class="primary" data-action="confirm">${escapeHtml(confirmText)}</button></div></div>`;
+      document.body.appendChild(modal);
+      modal.addEventListener('click', e => {
+        const action = e.target?.dataset?.action;
+        if (!action) return;
+        modal.remove();
+        resolve(action === 'confirm');
+      });
+    });
+  }
+
   function buildFullBarcodeLabelWindow(items) {
     const barcode = value => `https://barcode.tec-it.com/barcode.ashx?data=${encodeURIComponent(value)}&code=Code128&dpi=200&showhrt=false`;
     let labels = '';
@@ -3456,7 +3477,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         labels += `<article class="full-label"><div class="full-size">${escapeHtml(item.size || '')}</div><img class="full-barcode" src="${barcode(item.inventoryId)}"><div class="full-id">${escapeHtml(item.inventoryId)}</div><div class="full-title">${escapeHtml(item.title || '')}</div><div class="full-sku-line">SKU: ${escapeHtml(item.sku || '')}</div></article>`;
       }
     });
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Etiquetas Full</title><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:100mm;font-family:Arial}.sheet{display:grid;grid-template-columns:repeat(2,50mm);width:100mm}.full-label{position:relative;width:50mm;height:25mm;display:flex;flex-direction:column;justify-content:center;gap:0;padding:1mm 1.5mm;overflow:hidden;page-break-inside:avoid}.full-barcode{width:97%;height:9mm;object-fit:contain;align-self:center}.full-id{font-weight:900;font-size:8pt;text-align:center;letter-spacing:.3px;margin-top:.3mm}.full-title{font-weight:700;font-size:6.5pt;line-height:1.05;text-align:center;word-break:break-word;margin-top:.3mm}.full-sku-line{font-weight:700;font-size:6.5pt;text-align:left;padding-left:8%;margin-top:.4mm}.full-size{position:absolute;top:.8mm;right:1.2mm;font-size:13pt;font-weight:900;line-height:1}@page{size:100mm 25mm;margin:0}</style></head><body><main class="sheet">${labels}</main><script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Etiquetas Full</title><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:100mm;font-family:Arial}.sheet{display:grid;grid-template-columns:repeat(2,50mm);width:100mm}.full-label{position:relative;width:50mm;height:25mm;display:flex;flex-direction:column;justify-content:center;gap:0;padding:1mm 1.5mm;overflow:hidden;page-break-inside:avoid}.full-barcode{width:97%;height:9mm;object-fit:contain;align-self:center}.full-id{font-weight:900;font-size:8pt;text-align:center;letter-spacing:.3px;margin-top:.3mm}.full-title{font-weight:700;font-size:6.5pt;line-height:1.05;text-align:center;word-break:break-word;margin-top:.3mm}.full-sku-line{font-weight:700;font-size:6.5pt;text-align:left;padding-left:1.5mm;margin-top:.4mm}.full-size{position:absolute;top:.8mm;right:1.2mm;font-size:13pt;font-weight:900;line-height:1}@page{size:100mm 25mm;margin:0}</style></head><body><main class="sheet">${labels}</main><script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
     const w = window.open('', '_blank');
     if (!w) { setMessage('O navegador bloqueou a impressão.', 'error'); return false; }
     w.document.open(); w.document.write(html); w.document.close();
@@ -3521,6 +3542,8 @@ Isso NÃO chama mark-print novamente.`)) return;
       const size = /chic\s*seek/i.test(order.warehouseName || '') ? fullSizeFromSku(detail.sku) : '';
       const ok = buildFullBarcodeLabelWindow([{ inventoryId: chosen.inventoryId, title: chosen.title, size, sku: detail.sku, qty: 1 }]);
       if (!ok) { beep(false); focusScanner(); return; }
+      const confirmed = await confirmBoxCheckout('Confirmar impressão', `<p>A etiqueta do Full do SKU <strong>${escapeHtml(targetSku)}</strong> (${escapeHtml(chosen.inventoryId)}) saiu corretamente?</p>`, 'Sim, saiu correta');
+      if (!confirmed) { focusScanner(); return; }
       rec.byListing[chosen.inventoryId] = Number(rec.byListing[chosen.inventoryId] || 0) + 1;
       saveFullProgressState();
       setMessage(`Etiqueta Full impressa: ${targetSku} → ${chosen.inventoryId}.`, 'success');
@@ -3560,6 +3583,8 @@ Isso NÃO chama mark-print novamente.`)) return;
       const items = allocations.map(a => ({ inventoryId: a.item.inventoryId, title: a.item.title, size, sku: detail.sku, qty: a.qty }));
       const ok = buildFullBarcodeLabelWindow(items);
       if (!ok) { beep(false); return; }
+      const confirmed = await confirmBoxCheckout('Confirmar impressão', `<p>As <strong>${remaining}</strong> etiqueta(s) do Full do SKU <strong>${escapeHtml(sku)}</strong> saíram corretamente?</p>`, 'Sim, saíram corretas');
+      if (!confirmed) return;
       allocations.forEach(a => { rec.byListing[a.item.inventoryId] = Number(rec.byListing[a.item.inventoryId] || 0) + a.qty; });
       saveFullProgressState();
       setMessage(`${remaining} etiqueta(s) Full impressa(s) para ${sku}.`, 'success');

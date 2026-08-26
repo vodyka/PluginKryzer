@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.10.1
+// @version      2.10.2
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.2
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,21 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.10.1) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.10.2) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.10.2 (2026-08-26): checkout.js — corrige bug crítico: o popup de
+// escolha (SKU com 2+ anúncios vinculados no Full) usava a classe
+// "kzqc-modal-backdrop" (convenção do compras.js), mas o CSS deste arquivo
+// estiliza o overlay pelo ID #kzqc-modal — o popup ficava sem estilo nenhum,
+// invisível atrás do painel em tela cheia, travando a leitura sem erro
+// nenhum. Corrige pra usar o padrão real (#kzqc-modal/.kzqc-modal-card).
+// Também adiciona confirmação pós-impressão ("a etiqueta saiu corretamente?"
+// — mesmo padrão do compras.js) antes de contar como impresso, tanto na
+// bipagem unitária quanto na impressão em massa. E corrige o alinhamento da
+// linha "SKU:" nas duas etiquetas (compras.js e checkout.js), que ficava
+// centralizada apesar do text-align:left por causa do align-items:center
+// herdado do container pai.
 // v2.10.1 (2026-08-26): compras.js e checkout.js — ajustes na etiqueta do
 // Full pedidos pelo usuário após ver a impressão real: código de barras
 // volta pra altura da primeira versão (9mm/14mm — a versão mais alta estava
