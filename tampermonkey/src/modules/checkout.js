@@ -3413,17 +3413,21 @@ Isso NÃO chama mark-print novamente.`)) return;
       master.connect(ctx.destination);
 
       if (success) {
-        master.gain.setValueAtTime(0.72, ctx.currentTime);
-        master.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.24);
-        [880, 1320].forEach((freq, index) => {
+        // Volume no máximo possível via Web Audio (gain acima de 1 = ganho real,
+        // não só "menos silencioso") — pedido explícito do usuário pra ficar mais
+        // alto que até o alarme de erro. 3 camadas de tom em vez de 2 pra somar
+        // mais amplitude percebida, não só subir o gain de cada oscilador sozinho.
+        master.gain.setValueAtTime(3, ctx.currentTime);
+        master.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+        [[880, 'sine', 1], [1320, 'square', 0.85], [1760, 'triangle', 0.7]].forEach(([freq, type, gainValue], index) => {
           const osc = ctx.createOscillator();
-          osc.type = index ? 'square' : 'sine';
+          osc.type = type;
           osc.frequency.value = freq;
           const gain = ctx.createGain();
-          gain.gain.value = index ? 0.34 : 0.58;
+          gain.gain.value = gainValue;
           osc.connect(gain); gain.connect(master);
-          osc.start(ctx.currentTime + index * 0.035);
-          osc.stop(ctx.currentTime + 0.22);
+          osc.start(ctx.currentTime + index * 0.03);
+          osc.stop(ctx.currentTime + 0.26);
         });
         setTimeout(() => ctx.close().catch(() => {}), 500);
         return;
