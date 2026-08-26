@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.9.1
+// @version      2.9.2
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.9.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.9.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.9.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.9.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.9.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.9.2
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,16 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.9.1) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.9.2) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.9.2 (2026-08-26): compras.js — 3 ajustes na etiqueta do Full: (1)
+// desliga o texto legível embutido que o próprio TEC-IT desenha por baixo
+// do código de barras (&showhrt=false, confirmado via teste real na API),
+// que duplicava o inventoryId junto com o texto próprio da etiqueta — agora
+// só o texto próprio (maior, estilizável) aparece; (2) código de barras um
+// pouco maior; (3) a letra grande de tamanho só aparece quando o armazém do
+// pedido de recebimento é Chic Seek.
 // v2.9.1 (2026-08-26): checkout.js — corrige o layout do modo Full, que saía
 // todo espremido numa coluna estreita e com o cabeçalho sobrepondo o botão
 // "Origem". Causa: .kzqc-body é um grid de 3 colunas (sidebar + conteúdo +
