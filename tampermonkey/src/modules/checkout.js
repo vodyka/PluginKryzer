@@ -3453,6 +3453,31 @@ Isso NÃO chama mark-print novamente.`)) return;
   // etiqueta saiu certa antes de contar como impresso) — checkout.js não
   // tinha um helper de confirmação genérico, então usa a mesma convenção
   // #kzqc-modal/.kzqc-modal-card já usada pelos outros modais deste arquivo.
+  // Stepper de quantidade (mesmo visual/estrutura de showQuantityModal, usado
+  // pro fluxo normal de item único) — pergunta quantas etiquetas do Full
+  // imprimir agora, sempre que sobrar mais de 1 pendente pra aquele SKU.
+  function promptFullPrintQuantity(detail, remaining) {
+    return new Promise(resolve => {
+      document.getElementById('kzqc-modal')?.remove();
+      const modal = document.createElement('div');
+      modal.id = 'kzqc-modal';
+      modal.innerHTML = `<div class="kzqc-modal-card"><div class="kzqc-modal-title">SKU ${escapeHtml(detail.sku)}</div><div class="kzqc-modal-product">${detail.skuImage ? `<img src="${escapeHtml(detail.skuImage)}" alt="${escapeHtml(detail.skuTitle || detail.sku)}">` : '<span class="kzqc-modal-product-placeholder"></span>'}<div><b title="${escapeHtml(detail.skuTitle || '')}">${escapeHtml(detail.skuTitle || 'Produto sem nome')}</b><small>${remaining} pendente(s) pra imprimir</small></div></div><label class="kzqc-label" for="kzqc-full-qty">Quantidade para imprimir</label><div class="kzqc-qty-row"><button id="kzqc-minus" type="button">−</button><input id="kzqc-full-qty" type="number" min="1" max="${remaining}" value="${remaining}"><button id="kzqc-plus" type="button">+</button></div><div class="kzqc-modal-actions"><button id="kzqc-cancel" class="secondary" type="button">Cancelar</button><button id="kzqc-print" class="primary" type="button">Imprimir</button></div></div>`;
+      document.body.appendChild(modal);
+      const input = modal.querySelector('#kzqc-full-qty');
+      const clamp = value => Math.max(1, Math.min(remaining, parseInt(value || '1', 10) || 1));
+      modal.querySelector('#kzqc-minus').onclick = () => { input.value = clamp(Number(input.value) - 1); };
+      modal.querySelector('#kzqc-plus').onclick = () => { input.value = clamp(Number(input.value) + 1); };
+      modal.querySelector('#kzqc-cancel').onclick = () => { modal.remove(); resolve(null); };
+      modal.querySelector('#kzqc-print').onclick = () => { const qty = clamp(input.value); modal.remove(); resolve(qty); };
+      modal.addEventListener('click', event => { if (event.target === modal) { modal.remove(); resolve(null); } });
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') modal.querySelector('#kzqc-print').click();
+        if (event.key === 'Escape') modal.querySelector('#kzqc-cancel').click();
+      });
+      setTimeout(() => { input.focus(); input.select(); }, 50);
+    });
+  }
+
   function confirmBoxCheckout(title, html, confirmText = 'Confirmar') {
     return new Promise(resolve => {
       document.getElementById('kzqc-modal')?.remove();
@@ -3484,12 +3509,11 @@ Isso NÃO chama mark-print novamente.`)) return;
     return true;
   }
 
-  // Bipagem unitária: sempre 1 etiqueta por leitura. Consome a linha pendente
-  // mais antiga daquele SKU entre todos os pedidos de saída Full (FIFO) — uma
-  // leitura de código de barras não carrega contexto de qual pedido é.
   // Escopado ao pedido selecionado na lista à esquerda — sem isso não tem como
   // saber pra qual saída manual um código bipado pertence (mesmo SKU pode
-  // aparecer em pedidos diferentes com progressos diferentes).
+  // aparecer em pedidos diferentes com progressos diferentes). Se sobrar só 1
+  // pendente, imprime direto; se sobrar mais, pergunta a quantidade (mesmo
+  // fluxo de impressão em massa de produto único do checkout de pedido).
   async function handleFullScan(rawCode) {
     const scanned = normSku(rawCode);
     if (!scanned) { beep(false); focusScanner(); return; }
@@ -3526,6 +3550,15 @@ Isso NÃO chama mark-print novamente.`)) return;
       setMessage(`${targetSku} já está 100% impresso nesse pedido.`, 'warn');
       beep(false); focusScanner(); return;
     }
+    // Se sobra mais de 1 pra imprimir, pergunta a quantidade (igual o fluxo
+    // de impressão em massa de produto único do checkout de pedido) em vez
+    // de sempre imprimir só 1 por bipe.
+    let printQty = 1;
+    if (remaining > 1) {
+      const chosenQty = await promptFullPrintQuantity(detail, remaining);
+      if (!chosenQty) { focusScanner(); return; }
+      printQty = chosenQty;
+    }
     try {
       const invMap = await fetchFullInventoryMapCheckout();
       const matches = invMap.get(targetSku) || [];
@@ -3533,20 +3566,32 @@ Isso NÃO chama mark-print novamente.`)) return;
         setMessage(`SKU ${targetSku} não tem vínculo no Full. Etiqueta não impressa.`, 'error');
         beep(false); focusScanner(); return;
       }
-      let chosen = forcedListing || matches[0];
-      if (!forcedListing && matches.length > 1) {
-        const picked = await chooseFullInventoryItemCheckout(matches, { allowSplit: false });
+      let allocations;
+      if (forcedListing) {
+        allocations = [{ item: forcedListing, qty: printQty }];
+      } else if (matches.length === 1) {
+        allocations = [{ item: matches[0], qty: printQty }];
+      } else {
+        const picked = await chooseFullInventoryItemCheckout(matches, { allowSplit: printQty > 1, totalQty: printQty });
         if (!picked) { focusScanner(); return; }
-        chosen = picked.item;
+        allocations = picked.mode === 'split' ? picked.allocations : [{ item: picked.item, qty: printQty }];
       }
       const size = /chic\s*seek/i.test(order.warehouseName || '') ? fullSizeFromSku(detail.sku) : '';
-      const ok = buildFullBarcodeLabelWindow([{ inventoryId: chosen.inventoryId, title: chosen.title, size, sku: detail.sku, qty: 1 }]);
+      const items = allocations.map(a => ({ inventoryId: a.item.inventoryId, title: a.item.title, size, sku: detail.sku, qty: a.qty }));
+      const ok = buildFullBarcodeLabelWindow(items);
       if (!ok) { beep(false); focusScanner(); return; }
-      const confirmed = await confirmBoxCheckout('Confirmar impressão', `<p>A etiqueta do Full do SKU <strong>${escapeHtml(targetSku)}</strong> (${escapeHtml(chosen.inventoryId)}) saiu corretamente?</p>`, 'Sim, saiu correta');
+      const totalPrinted = allocations.reduce((s, a) => s + a.qty, 0);
+      const confirmed = await confirmBoxCheckout(
+        'Confirmar impressão',
+        totalPrinted > 1
+          ? `<p>As <strong>${totalPrinted}</strong> etiquetas do Full do SKU <strong>${escapeHtml(targetSku)}</strong> saíram corretamente?</p>`
+          : `<p>A etiqueta do Full do SKU <strong>${escapeHtml(targetSku)}</strong> (${escapeHtml(allocations[0].item.inventoryId)}) saiu corretamente?</p>`,
+        totalPrinted > 1 ? 'Sim, saíram corretas' : 'Sim, saiu correta'
+      );
       if (!confirmed) { focusScanner(); return; }
-      rec.byListing[chosen.inventoryId] = Number(rec.byListing[chosen.inventoryId] || 0) + 1;
+      allocations.forEach(a => { rec.byListing[a.item.inventoryId] = Number(rec.byListing[a.item.inventoryId] || 0) + a.qty; });
       saveFullProgressState();
-      setMessage(`Etiqueta Full impressa: ${targetSku} → ${chosen.inventoryId}.`, 'success');
+      setMessage(`${totalPrinted} etiqueta(s) Full impressa(s) para ${targetSku}.`, 'success');
       beep(true);
       scheduleRender();
     } catch (error) {

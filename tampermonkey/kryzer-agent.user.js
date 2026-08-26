@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.10.2
+// @version      2.11.0
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.2
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.2
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.11.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.11.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.11.0
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,15 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.10.2) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.11.0) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.11.0 (2026-08-26): checkout.js — bipar um SKU do Full com mais de 1
+// pendente agora pergunta a quantidade a imprimir (stepper igual o fluxo de
+// impressão em massa de produto único do checkout de pedido), em vez de
+// imprimir sempre só 1 por leitura. Se o SKU tiver 2+ anúncios vinculados no
+// Full e a quantidade escolhida for maior que 1, também oferece dividir
+// entre os anúncios — mesma lógica já usada no botão "Imprimir em massa".
 // v2.10.2 (2026-08-26): checkout.js — corrige bug crítico: o popup de
 // escolha (SKU com 2+ anúncios vinculados no Full) usava a classe
 // "kzqc-modal-backdrop" (convenção do compras.js), mas o CSS deste arquivo
