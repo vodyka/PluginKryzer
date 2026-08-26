@@ -3448,14 +3448,14 @@ Isso NÃO chama mark-print novamente.`)) return;
   }
 
   function buildFullBarcodeLabelWindow(items) {
-    const barcode = value => `https://barcode.tec-it.com/barcode.ashx?data=${encodeURIComponent(value)}&code=Code128&dpi=200`;
+    const barcode = value => `https://barcode.tec-it.com/barcode.ashx?data=${encodeURIComponent(value)}&code=Code128&dpi=200&showhrt=false`;
     let labels = '';
     items.forEach(item => {
       for (let i = 0; i < Math.max(1, Number(item.qty || 1)); i++) {
         labels += `<article class="full-label"><div class="full-size">${escapeHtml(item.size || '')}</div><img class="full-barcode" src="${barcode(item.inventoryId)}"><div class="full-id">${escapeHtml(item.inventoryId)}</div><div class="full-title">${escapeHtml(item.title || '')}</div></article>`;
       }
     });
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Etiquetas Full</title><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:100mm;font-family:Arial}.sheet{display:grid;grid-template-columns:repeat(2,50mm);width:100mm}.full-label{position:relative;width:50mm;height:25mm;display:flex;flex-direction:column;justify-content:center;gap:0;padding:1mm 1.5mm;overflow:hidden;page-break-inside:avoid}.full-barcode{width:90%;height:9mm;object-fit:contain;align-self:center}.full-id{font-weight:900;font-size:8pt;text-align:center;letter-spacing:.3px;margin-top:.3mm}.full-title{font-weight:700;font-size:6.5pt;line-height:1.05;text-align:center;word-break:break-word;margin-top:.3mm}.full-size{position:absolute;top:.8mm;right:1.2mm;font-size:13pt;font-weight:900;line-height:1}@page{size:100mm 25mm;margin:0}</style></head><body><main class="sheet">${labels}</main><script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Etiquetas Full</title><style>*{box-sizing:border-box}html,body{margin:0;padding:0;width:100mm;font-family:Arial}.sheet{display:grid;grid-template-columns:repeat(2,50mm);width:100mm}.full-label{position:relative;width:50mm;height:25mm;display:flex;flex-direction:column;justify-content:center;gap:0;padding:1mm 1.5mm;overflow:hidden;page-break-inside:avoid}.full-barcode{width:94%;height:11mm;object-fit:contain;align-self:center}.full-id{font-weight:900;font-size:8pt;text-align:center;letter-spacing:.3px;margin-top:.3mm}.full-title{font-weight:700;font-size:6.5pt;line-height:1.05;text-align:center;word-break:break-word;margin-top:.3mm}.full-size{position:absolute;top:.8mm;right:1.2mm;font-size:13pt;font-weight:900;line-height:1}@page{size:100mm 25mm;margin:0}</style></head><body><main class="sheet">${labels}</main><script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
     const w = window.open('', '_blank');
     if (!w) { setMessage('O navegador bloqueou a impressão.', 'error'); return false; }
     w.document.open(); w.document.write(html); w.document.close();
@@ -3496,7 +3496,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         if (!picked) { focusScanner(); return; }
         chosen = picked.item;
       }
-      const size = fullSizeFromSku(target.detail.sku);
+      const size = /chic\s*seek/i.test(target.order.warehouseName || '') ? fullSizeFromSku(target.detail.sku) : '';
       const ok = buildFullBarcodeLabelWindow([{ inventoryId: chosen.inventoryId, title: chosen.title, size, qty: 1 }]);
       if (!ok) { beep(false); focusScanner(); return; }
       const rec = fullProgressForLine(target.detail.idStr || target.detail.id);
@@ -3524,7 +3524,7 @@ Isso NÃO chama mark-print novamente.`)) return;
     const remaining = Math.max(0, Number(detail.qty || 0) - fullPrintedTotal(rec));
     if (remaining <= 0) { setMessage('Esse item já está 100% impresso.', 'warn'); return; }
     const sku = normSku(detail.sku);
-    const size = fullSizeFromSku(detail.sku);
+    const size = /chic\s*seek/i.test(order.warehouseName || '') ? fullSizeFromSku(detail.sku) : '';
     try {
       setMessage(`Consultando vínculo Full de ${sku}...`, 'info');
       const invMap = await fetchFullInventoryMapCheckout();
