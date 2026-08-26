@@ -3436,21 +3436,60 @@ Isso NÃO chama mark-print novamente.`)) return;
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       const ctx = new AudioContext();
       const master = ctx.createGain();
-      master.gain.setValueAtTime(success ? 0.72 : 0.62, ctx.currentTime);
-      master.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + (success ? 0.24 : 0.38));
       master.connect(ctx.destination);
-      const freqs = success ? [880, 1320] : [220, 165];
-      freqs.forEach((freq, index) => {
+
+      if (success) {
+        master.gain.setValueAtTime(0.72, ctx.currentTime);
+        master.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.24);
+        [880, 1320].forEach((freq, index) => {
+          const osc = ctx.createOscillator();
+          osc.type = index ? 'square' : 'sine';
+          osc.frequency.value = freq;
+          const gain = ctx.createGain();
+          gain.gain.value = index ? 0.34 : 0.58;
+          osc.connect(gain); gain.connect(master);
+          osc.start(ctx.currentTime + index * 0.035);
+          osc.stop(ctx.currentTime + 0.22);
+        });
+        setTimeout(() => ctx.close().catch(() => {}), 500);
+        return;
+      }
+
+      // Alarme de erro: o apito antigo (1 tom grave só, 0.36s) era baixo demais
+      // pra ouvir no chão da operação. Agora são 3 apitos agudos em sequência,
+      // volume no máximo, tipo alarme — junto com o flash vermelho na tela.
+      const pulseCount = 3;
+      const pulseDuration = 0.16;
+      const gap = 0.09;
+      master.gain.setValueAtTime(1, ctx.currentTime);
+      for (let i = 0; i < pulseCount; i++) {
+        const start = ctx.currentTime + i * (pulseDuration + gap);
         const osc = ctx.createOscillator();
-        osc.type = index ? 'square' : 'sine';
-        osc.frequency.value = freq;
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(1000, start);
+        osc.frequency.exponentialRampToValueAtTime(700, start + pulseDuration);
         const gain = ctx.createGain();
-        gain.gain.value = index ? 0.34 : 0.58;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(1, start + 0.015);
+        gain.gain.setValueAtTime(1, start + pulseDuration - 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + pulseDuration);
         osc.connect(gain); gain.connect(master);
-        osc.start(ctx.currentTime + index * 0.035);
-        osc.stop(ctx.currentTime + (success ? 0.22 : 0.36));
-      });
-      setTimeout(()=>ctx.close().catch(()=>{}),500);
+        osc.start(start);
+        osc.stop(start + pulseDuration + 0.01);
+      }
+      const totalDuration = pulseCount * (pulseDuration + gap);
+      setTimeout(() => ctx.close().catch(() => {}), (totalDuration + 0.3) * 1000);
+      flashErrorAlert();
+    } catch {}
+  }
+
+  function flashErrorAlert() {
+    try {
+      document.getElementById('kzqc-error-flash')?.remove();
+      const overlay = document.createElement('div');
+      overlay.id = 'kzqc-error-flash';
+      (document.body || document.documentElement).appendChild(overlay);
+      setTimeout(() => overlay.remove(), 750);
     } catch {}
   }
 
@@ -3821,6 +3860,8 @@ Isso NÃO chama mark-print novamente.`)) return;
       .kzqc-row-order{font-size:14px!important;font-weight:600!important;color:#262626!important;letter-spacing:.1px!important}
       .kzqc-row-product-sku{font-size:10px!important;color:#8c8c8c!important;margin-top:2px!important}
       @media(max-width:640px){#kzqc-order-modal .kzqc-modal-card.kzqc-modal-wide{padding:18px!important}#kzqc-order-modal .kzqc-warehouse-rename-list label{grid-template-columns:1fr!important;gap:6px!important}}
+      #kzqc-error-flash{position:fixed;inset:0;z-index:2147483647;background:#ff0000;pointer-events:none;animation:kzqcErrorFlash .75s ease-in-out}
+      @keyframes kzqcErrorFlash{0%{opacity:0}12%{opacity:.6}24%{opacity:0}36%{opacity:.6}48%{opacity:0}60%{opacity:.45}100%{opacity:0}}
 
     `;
     (document.head || document.documentElement).appendChild(style);
