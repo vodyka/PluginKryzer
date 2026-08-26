@@ -4063,3 +4063,9 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
 
   init();
 }
+
+try {
+  initCheckoutModule();
+} catch (e) {
+  console.warn('[Kryzer Agent] erro ao iniciar módulo initCheckoutModule:', e);
+}

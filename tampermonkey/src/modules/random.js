@@ -262,3 +262,9 @@ function initRandomModule() {
   setTimeout(runScan, FIRST_SCAN_DELAY_MS);
   setInterval(runScan, SCAN_INTERVAL_MS);
 }
+
+try {
+  initRandomModule();
+} catch (e) {
+  console.warn('[Kryzer Agent] erro ao iniciar módulo initRandomModule:', e);
+}

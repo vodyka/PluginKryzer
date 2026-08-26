@@ -1059,3 +1059,9 @@ function initAlertaVendaModule() {
 
   iniciarScript();
 }
+
+try {
+  initAlertaVendaModule();
+} catch (e) {
+  console.warn('[Kryzer Agent] erro ao iniciar módulo initAlertaVendaModule:', e);
+}
