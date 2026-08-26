@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.10.0
+// @version      2.10.1
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.10.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.10.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.10.1
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,15 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.10.0) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.10.1) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.10.1 (2026-08-26): compras.js e checkout.js — ajustes na etiqueta do
+// Full pedidos pelo usuário após ver a impressão real: código de barras
+// volta pra altura da primeira versão (9mm/14mm — a versão mais alta estava
+// saindo com o código de barras falhado/distorcido na impressão) e um pouco
+// mais largo; nova linha "SKU: <sku do armazém>" abaixo do título, alinhada
+// à esquerda com um respiro (diferente do resto, que é centralizado).
 // v2.10.0 (2026-08-26): checkout.js — corrige e redesenha o modo Full:
 // (1) bug crítico: o desvio pro modo Full rodava DEPOIS do resolveScanToSku
 // do fluxo normal, que depende de pedidos que não existem nesse modo e
