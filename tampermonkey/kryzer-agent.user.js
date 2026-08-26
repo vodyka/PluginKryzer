@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.1.1
-// @description  Agente único do UpSeller: liga direto os módulos de checkout, compras, alerta de venda e random — sem depender de nenhum backend externo pra decidir isso.
+// @version      2.2.0
+// @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
 // @grant        GM_getValue
@@ -15,17 +15,16 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.1.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.1.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.1.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/random.js?v=2.1.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.2.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.2.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.2.0
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
 
 // ATENÇÃO: este arquivo agora é só o LOADER — carrega cada módulo direto do
-// GitHub via @require (src/modules/checkout.js, compras.js, alerta-venda.js,
-// random.js). NÃO existe mais build.js/bundle local: editar o módulo certo em
+// GitHub via @require (src/modules/checkout.js, compras.js, alerta-venda.js).
+// NÃO existe mais build.js/bundle local: editar o módulo certo em
 // src/modules/, commitar e dar push — o Tampermonkey de quem já tem o script
 // instalado busca sozinho a versão nova (automático periodicamente, ou na
 // hora clicando em "Check for userscript updates" no painel dele).
@@ -34,9 +33,13 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.1.1) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.2.0) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.2.0 (2026-08-26): remove por completo o módulo random (troca automática
+// de produto Aleatório/Sortido/Variado por estoque parado). Ficou redundante
+// desde que o UpSeller passou a resolver isso direto no cadastro do produto
+// — o pedido já cai normal, sem precisar de swap depois.
 // v2.1.1 (2026-08-26): corrige checkout.js — quando um kit (groupVOS) era
 // comprado mais de uma vez no MESMO item de pedido (productCount > 1), a
 // quantidade de cada componente não multiplicava por isso, só usava a
