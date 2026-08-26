@@ -1,0 +1,57 @@
+project_id = "neetghmmqrnttrzzrcqs"
+
+# Allowed redirect targets for Supabase Auth magic-link sign-in (painel/).
+[auth]
+site_url = "https://painel-dun-six.vercel.app"
+additional_redirect_urls = ["https://painel-dun-six.vercel.app", "http://localhost:3000"]
+
+# Both OAuth functions are hit directly by a browser (redirect flow) or by
+# Canva's own redirect — there's no Supabase-issued JWT to verify.
+[functions.canva-oauth-start]
+verify_jwt = false
+
+[functions.canva-oauth-callback]
+verify_jwt = false
+
+# Called by the Tampermonkey agent directly, no Supabase JWT involved —
+# guarded instead by the X-Kryzer-Secret header (see SYNC_SHARED_SECRET).
+[functions.create-design]
+verify_jwt = false
+
+[functions.pending-updates]
+verify_jwt = false
+
+[functions.ack-update]
+verify_jwt = false
+
+# Invoked by pg_cron/pg_net (see migration 0006), also guarded by
+# X-Kryzer-Secret rather than a Supabase JWT.
+[functions.poll-canva-changes]
+verify_jwt = false
+
+# Called by the Tampermonkey multi-computer bridge agent.
+[functions.agent-checkin]
+verify_jwt = false
+
+[functions.agent-actions]
+verify_jwt = false
+
+[functions.agent-ack]
+verify_jwt = false
+
+# "Criar" (kit creation) module — same X-Kryzer-Secret posture as everything
+# else the Tampermonkey agent calls directly.
+[functions.kit-get-config]
+verify_jwt = false
+
+[functions.kit-save-config]
+verify_jwt = false
+
+[functions.kit-next-sequence]
+verify_jwt = false
+
+[functions.kit-upload-template]
+verify_jwt = false
+
+[functions.kit-delete-template]
+verify_jwt = false
