@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.1.0
+// @version      2.1.1
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras, alerta de venda e random — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -15,10 +15,10 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.1.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.1.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.1.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/random.js?v=2.1.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.1.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.1.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.1.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/random.js?v=2.1.1
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -34,9 +34,15 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.1.0) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.1.1) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.1.1 (2026-08-26): corrige checkout.js — quando um kit (groupVOS) era
+// comprado mais de uma vez no MESMO item de pedido (productCount > 1), a
+// quantidade de cada componente não multiplicava por isso, só usava a
+// quantidade de 1 kit. Pedido de 2x kit com 2 peças/kit mostrava 2 peças em
+// vez de 4. Motivo real: pedido UPY71196758 (K02011 x2, kit de par -> devia
+// pedir 16975 x4, mostrou só x2).
 // v2.1.0 (2026-08-26): fim do bundle único (kryzer-agent.user.js gerado por
 // build.js); volta ao esquema de um arquivo por módulo, cada um carregado
 // direto do GitHub.

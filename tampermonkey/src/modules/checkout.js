@@ -1273,9 +1273,14 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
       if (Array.isArray(node?.groupVOS) && node.groupVOS.length) {
         const commercialSku = normSku(node?.sku || node?.productSku || node?.variationSku || node?.warehouseSku || '');
+        // O groupVOS traz a quantidade de cada componente PARA 1 KIT (component.num).
+        // Se o próprio kit foi comprado mais de uma vez nesse mesmo item de pedido
+        // (ex.: productCount:2 pro kit), precisa multiplicar — senão um pedido de
+        // 2x kit (par = 2 peças/kit) mostra só 2 peças pra separar em vez de 4.
+        const kitMultiplier = detectItemQty(node);
         const rows = node.groupVOS.map(component => ({
           sku: normSku(component?.varSku || component?.warehouseSku || component?.componentSku),
-          qty: Math.max(1, numberValue(component?.num ?? component?.goodsCount ?? 1, 1)),
+          qty: Math.max(1, numberValue(component?.num ?? component?.goodsCount ?? 1, 1) * kitMultiplier),
           title: norm(component?.title || component?.varSkuTitle || component?.name),
           image: norm(component?.imgUrl || component?.imageUrl || component?.image),
           scanAliases: mergeScanAliases(
