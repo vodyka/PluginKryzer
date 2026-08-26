@@ -1194,35 +1194,6 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     return candidates[0] || null;
   }
 
-  function isSameLocalDay(a, b = new Date()) {
-    if (!(a instanceof Date) || Number.isNaN(a.getTime())) return false;
-    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  }
-
-  function makeTodayTime(hour, minute) {
-    const d = new Date();
-    d.setHours(hour, minute, 0, 0);
-    return d;
-  }
-
-  function getOperationalCutoff(order) {
-    const channel = getOrderPlatform(order);
-    const shop = getOrderShopName(order).toLowerCase();
-    if (channel === 'mercado') return makeTodayTime(14, 15);
-    if (channel === 'kwai' || channel === 'tiktok') return makeTodayTime(16, 40);
-    if (channel === 'shein') return makeTodayTime(16, 40);
-    if (channel === 'shopee' && /amarel/.test(shop)) return makeTodayTime(14, 30);
-    if (channel === 'shopee') return makeTodayTime(15, 0);
-    return null;
-  }
-
-  function orderPriorityAt(order, deadline) {
-    const cutoff = getOperationalCutoff(order);
-    if (deadline && isSameLocalDay(deadline) && cutoff) {
-      return new Date(Math.min(deadline.getTime(), cutoff.getTime()));
-    }
-    return deadline || cutoff || null;
-  }
 
   function channelLabel(channel) {
     return CHANNELS.find(item => item.id === channel)?.label || channel || 'Outro';
@@ -1618,7 +1589,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     const marketFirst = Array.isArray(order?.orderItemList) ? order.orderItemList[0] : null;
     const sku = category === 'single1' || category === 'singleMany' ? first.sku : '';
     const deadline = getOrderDeadline(order);
-    const priority = orderPriorityAt(order, deadline);
+    // priority costumava ser o menor entre o prazo real e um "corte operacional"
+    // por canal (ex.: Shopee 15:00) — removido a pedido do usuário, o painel
+    // mostra sempre o prazo oficial da plataforma, igual o nativo do UpSeller.
+    const priority = deadline;
     const channel = getOrderPlatform(order);
 
     return {
