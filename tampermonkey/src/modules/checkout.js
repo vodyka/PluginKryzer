@@ -901,6 +901,59 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     return isUnprintedTabActive();
   }
 
+  // Endpoint nativo do UpSeller (confirmado via captura de rede real feita pelo
+  // usuário): dispara a re-tentativa de alocação de estoque pros pedidos "Sem
+  // Estoque" da conta. Não recebe parâmetros. Retorna um uuid de job em
+  // data, que precisa ser consultado em /api/check-process (mesmo padrão já
+  // usado em generatePdfForOrder) até processMsg.code virar 1 (concluído) ou
+  // -1 (falhou).
+  async function triggerAutoRefreshStock() {
+    let triggerJson;
+    try {
+      const result = await postJson('/api/order/auto-refresh-stock', {});
+      triggerJson = result.json;
+    } catch (error) {
+      console.warn('[KZ Checkout] auto-refresh-stock: falha ao acionar:', error);
+      return;
+    }
+    if (!isSuccess(triggerJson)) {
+      console.warn('[KZ Checkout] auto-refresh-stock: resposta sem sucesso:', triggerJson);
+      return;
+    }
+    const uuid = norm(triggerJson?.data);
+    if (!uuid) return;
+
+    for (let attempt = 1; attempt <= 25; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 650));
+      let checkJson;
+      try {
+        const checkResponse = await fetch('/api/check-process?uuid=' + encodeURIComponent(uuid), {
+          credentials: 'include',
+        });
+        checkJson = await checkResponse.json();
+      } catch {
+        continue;
+      }
+      let processMsg = checkJson?.data?.processMsg;
+      if (typeof processMsg === 'string') {
+        try { processMsg = JSON.parse(processMsg); } catch {}
+      }
+
+      if (processMsg?.code === 1 || processMsg?.code === '1') {
+        appLog('info', 'auto_refresh_stock_concluido', {
+          sucesso: processMsg?.successNum ?? processMsg?.data?.successList?.length ?? 0,
+          total: processMsg?.totalNum,
+        });
+        return;
+      }
+      if (processMsg?.code === -1 || processMsg?.code === '-1') {
+        console.warn('[KZ Checkout] auto-refresh-stock: job terminou com falha:', processMsg);
+        return;
+      }
+    }
+    console.warn('[KZ Checkout] auto-refresh-stock: tempo esgotado aguardando conclusão.');
+  }
+
   async function requestOrdersRefresh(manual = false) {
     if (state.refreshing || state.loading || state.checkoutSession || document.getElementById('kzqc-modal')) return;
     state.refreshing = true;
@@ -910,6 +963,8 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     const scannerWasFocused = activeBefore?.id === 'kzqc-scanner';
     if (manual) {
       skuDetailCache.clear();
+      setMessage('Reavaliando estoque dos pedidos...', 'info');
+      await triggerAutoRefreshStock();
       setMessage('Atualizando pedidos de Etiqueta não impressa...', 'info');
     }
     scheduleRender();
