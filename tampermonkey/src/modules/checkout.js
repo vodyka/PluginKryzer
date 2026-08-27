@@ -3715,6 +3715,57 @@ Isso NÃO chama mark-print novamente.`)) return;
     });
   }
 
+  function findOrderByTrackingNumber(code) {
+    const target = norm(code);
+    if (!target) return null;
+    return (state.orders || []).find(o => norm(o.raw?.trackingNumber) === target) || null;
+  }
+
+  // Bipar o código de rastreio avança o pedido de status, sem escanear
+  // produto: "não impresso" -> marca como impresso (POST /api/order/mark-print,
+  // o mesmo endpoint já usado hoje depois de imprimir de verdade — aqui só
+  // atualiza o status, sem acionar o plugin de impressão, confirmado com o
+  // usuário que é esse o comportamento esperado). Pedido já "impresso" ->
+  // avança pra "Para Retirada" (POST /api/order/batch-to-pickup, confirmado
+  // por captura de rede real: orderIdList + scanType:0).
+  async function handleTrackingScan(order) {
+    const alreadyPrinted = order.raw?.isPrintLabel === 1 || order.raw?.labelStatus === 'success';
+    const label = order.orderNo || order.idStr;
+    try {
+      if (!alreadyPrinted) {
+        setMessage(`Marcando pedido ${label} como impresso...`, 'info');
+        const result = await markOrders([order.idStr]);
+        if (result.ok) {
+          setMessage(`Pedido ${label} marcado como impresso.`, 'success');
+          beep(true);
+          requestOrdersRefresh(true);
+        } else {
+          setMessage(`Falha ao marcar pedido ${label} como impresso.`, 'error');
+          beep(false);
+        }
+      } else {
+        setMessage(`Enviando pedido ${label} para Retirada...`, 'info');
+        const body = new URLSearchParams();
+        body.set('orderIdList', order.idStr);
+        body.set('scanType', '0');
+        const { json } = await postForm('/api/order/batch-to-pickup', body);
+        if (isSuccess(json)) {
+          setMessage(`Pedido ${label} enviado para Retirada.`, 'success');
+          beep(true);
+          requestOrdersRefresh(true);
+        } else {
+          setMessage(json?.msg || `Falha ao enviar pedido ${label} para Retirada.`, 'error');
+          beep(false);
+        }
+      }
+    } catch (error) {
+      console.error('[KZ Checkout] leitura por rastreio:', error);
+      setMessage(error.message || String(error), 'error');
+      beep(false);
+    }
+    focusScanner();
+  }
+
   async function handleScan(value) {
     const input = document.getElementById('kzqc-scanner');
     const shortageMatch = String(value == null ? '' : value).trim().match(/^-\s*([^\s*]+)\s*\*\s*(\d+)\s*$/);
@@ -3743,6 +3794,12 @@ Isso NÃO chama mark-print novamente.`)) return;
     // de state.orders (vazio aqui) e faz uma chamada de rede pensada pra outro
     // contexto, travando a leitura sem nunca resolver.
     if (state.originMode === 'full') { await handleFullScan(rawCode); return; }
+
+    // Bipar o código de rastreio (em vez do SKU) avança o pedido de status
+    // sem precisar escanear produto nenhum — checa isso antes de tratar o
+    // código como SKU, já que rastreio nunca bate com nenhum SKU real.
+    const trackingOrder = findOrderByTrackingNumber(rawCode);
+    if (trackingOrder) { await handleTrackingScan(trackingOrder); return; }
 
     setMessage(`Localizando ${rawCode}...`, 'info');
     const scannedCode = await resolveScanToSku(rawCode);
