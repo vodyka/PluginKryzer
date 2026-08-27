@@ -3715,10 +3715,42 @@ Isso NÃO chama mark-print novamente.`)) return;
     });
   }
 
-  function findOrderByTrackingNumber(code) {
+  // Primeiro tenta achar localmente (pedidos "etiqueta não impressa" já
+  // carregados, sem gastar rede). Se não achar — o que é o caso normal pra
+  // pedido já impresso, já que esse pedido nem entra nessa lista — busca ao
+  // vivo por /api/order/index com searchType:4 (busca por rastreio,
+  // confirmado por captura de rede real; mesmo endpoint/formato de parâmetro
+  // já usado em todo o resto do módulo, só sem os filtros de estado/etiqueta
+  // pra não escapar do pedido que estou procurando).
+  async function findOrderByTrackingNumber(code) {
     const target = norm(code);
     if (!target) return null;
-    return (state.orders || []).find(o => norm(o.raw?.trackingNumber) === target) || null;
+    const local = (state.orders || []).find(o => norm(o.raw?.trackingNumber) === target);
+    if (local) return local;
+
+    // Só vale a pena gastar uma chamada de rede se o código parece mesmo um
+    // rastreio (só dígitos, comprido — todos os exemplos reais têm 10-11).
+    // Sem isso, toda leitura de SKU normal (que nunca bate localmente)
+    // dispararia essa busca à toa, atrasando o fluxo principal do dia a dia.
+    if (!/^\d{8,}$/.test(target)) return null;
+
+    const body = new URLSearchParams({
+      timeType: '0',
+      searchType: '4',
+      searchValue: target,
+      sortName: '0',
+      sortValue: '0',
+      isVoided: '0',
+      pageNum: '1',
+      pageSize: '50',
+      warehouseType: '0',
+    });
+    const { json } = await postForm('/api/order/index', body);
+    if (!isSuccess(json)) return null;
+    const list = extractOrderList(json);
+    const raw = list.find(o => norm(o?.trackingNumber) === target);
+    if (!raw) return null;
+    return { idStr: norm(raw.idStr || raw.id), orderNo: norm(raw.orderNumber || raw.orderNo), raw };
   }
 
   // Bipar o código de rastreio avança o pedido de status, sem escanear
@@ -3798,7 +3830,7 @@ Isso NÃO chama mark-print novamente.`)) return;
     // Bipar o código de rastreio (em vez do SKU) avança o pedido de status
     // sem precisar escanear produto nenhum — checa isso antes de tratar o
     // código como SKU, já que rastreio nunca bate com nenhum SKU real.
-    const trackingOrder = findOrderByTrackingNumber(rawCode);
+    const trackingOrder = await findOrderByTrackingNumber(rawCode);
     if (trackingOrder) { await handleTrackingScan(trackingOrder); return; }
 
     setMessage(`Localizando ${rawCode}...`, 'info');

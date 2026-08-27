@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.12.0
+// @version      2.12.1
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,9 +17,9 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.12.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.12.0
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.12.0
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.12.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.12.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.12.1
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -35,9 +35,16 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.12.0) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.12.1) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
 //
+// v2.12.1 (2026-08-27): checkout.js — corrige a busca por rastreio: só
+// procurava localmente em state.orders (a lista de "etiqueta não impressa"),
+// então um pedido já impresso nunca era encontrado — quebrando exatamente a
+// segunda leitura (impresso -> Para Retirada), que só faz sentido pra pedido
+// já impresso. Agora, se não achar localmente e o código parecer mesmo um
+// rastreio (só dígitos, 8+), busca ao vivo em /api/order/index com
+// searchType:4 (busca por rastreio, confirmado por captura de rede real).
 // v2.12.0 (2026-08-26): checkout.js — bipar o CÓDIGO DE RASTREIO (em vez do
 // SKU) no campo de leitura normal avança o status do pedido sem escanear
 // produto: pedido "não impresso" -> marca como impresso (POST
