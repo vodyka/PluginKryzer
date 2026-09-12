@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("kryzerPrint", {
   pair: (code) => ipcRenderer.invoke("print:pair", code),
   getPrinters: () => ipcRenderer.invoke("print:get-printers"),
   setPrinter: (printerName) => ipcRenderer.invoke("print:set-printer", printerName),
+  setSettings: (settings) => ipcRenderer.invoke("print:set-settings", settings),
   retryNow: () => ipcRenderer.invoke("print:retry-now"),
   onState: (callback) => ipcRenderer.on("print:state", (_event, state) => callback(state)),
 });
