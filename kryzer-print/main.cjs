@@ -6,8 +6,10 @@ const crypto = require("node:crypto");
 const { print, getPrinters } = require("pdf-to-printer");
 
 const API_BASE = process.env.KRYZER_PRINT_API || "https://app.kryzerdigital.com.br/api/kryzer-print";
+const API_ORIGIN = new URL(API_BASE).origin;
 const APP_VERSION = app.getVersion();
 const PROTOCOL = "kryzer-print";
+const PAPER_FORMATS = new Set(["10X15", "A4", "PRINTER_DEFAULT"]);
 
 let mainWindow = null;
 let heartbeatTimer = null;
@@ -17,6 +19,9 @@ let state = {
   paired: false,
   connected: false,
   printerName: null,
+  labelPaperFormat: "10X15",
+  documentPaperFormat: "A4",
+  autoPrintLabel: true,
   token: null,
   agentId: null,
   lastSeen: null,
@@ -44,6 +49,11 @@ function configPath() {
   return path.join(app.getPath("userData"), "config.json");
 }
 
+function normalizePaperFormat(value, fallback) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return PAPER_FORMATS.has(normalized) ? normalized : fallback;
+}
+
 async function loadConfig() {
   try {
     const content = await fs.readFile(configPath(), "utf8");
@@ -54,6 +64,9 @@ async function loadConfig() {
       token: config.token || null,
       agentId: config.agentId || null,
       printerName: config.printerName || null,
+      labelPaperFormat: normalizePaperFormat(config.labelPaperFormat, "10X15"),
+      documentPaperFormat: normalizePaperFormat(config.documentPaperFormat, "A4"),
+      autoPrintLabel: config.autoPrintLabel !== false,
     };
   } catch {
     // primeira execução
@@ -66,6 +79,9 @@ async function saveConfig() {
     token: state.token,
     agentId: state.agentId,
     printerName: state.printerName,
+    labelPaperFormat: state.labelPaperFormat,
+    documentPaperFormat: state.documentPaperFormat,
+    autoPrintLabel: state.autoPrintLabel,
   }, null, 2), "utf8");
 }
 
@@ -74,6 +90,9 @@ function publicState() {
     paired: state.paired,
     connected: state.connected,
     printerName: state.printerName,
+    labelPaperFormat: state.labelPaperFormat,
+    documentPaperFormat: state.documentPaperFormat,
+    autoPrintLabel: state.autoPrintLabel,
     agentId: state.agentId,
     lastSeen: state.lastSeen,
     lastError: state.lastError,
@@ -108,6 +127,9 @@ async function heartbeat() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         printerName: state.printerName,
+        labelPaperFormat: state.labelPaperFormat,
+        documentPaperFormat: state.documentPaperFormat,
+        autoPrintLabel: state.autoPrintLabel,
         appVersion: APP_VERSION,
         os: `${os.type()} ${os.release()}`,
       }),
@@ -123,12 +145,41 @@ async function heartbeat() {
 }
 
 async function downloadToTemp(url) {
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new Error(`Não foi possível baixar o arquivo para impressão (${response.status}).`);
+  let headers = {};
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin === API_ORIGIN && state.token) headers = { "x-kryzer-print-token": state.token };
+  } catch {
+    // URL inválida será tratada pelo fetch abaixo
+  }
+  const response = await fetch(url, { redirect: "follow", headers });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text.slice(0, 400) || `Não foi possível baixar o arquivo para impressão (${response.status}).`);
+  }
   const bytes = Buffer.from(await response.arrayBuffer());
   const file = path.join(app.getPath("temp"), `kryzer-print-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.pdf`);
   await fs.writeFile(file, bytes);
   return file;
+}
+
+function printOptions(job) {
+  const isLabel = String(job.job_type || "").toUpperCase() === "LABEL";
+  const paperFormat = isLabel ? state.labelPaperFormat : state.documentPaperFormat;
+  const printerName = job.printer_name || state.printerName || undefined;
+  const options = {
+    copies: Math.max(1, Number(job.copies || 1)),
+    silent: true,
+    ...(printerName ? { printer: printerName } : {}),
+  };
+  if (paperFormat === "A4") {
+    options.paperSize = "A4";
+    options.scale = "fit";
+  } else if (paperFormat === "10X15") {
+    options.paperSize = "4x6";
+    options.scale = "noscale";
+  }
+  return options;
 }
 
 async function processJobs() {
@@ -140,22 +191,18 @@ async function processJobs() {
     const job = result.job;
     if (!job) return;
 
-    state.lastJob = { id: job.id, status: "PROCESSING", createdAt: job.created_at };
+    state.lastJob = { id: job.id, status: "PROCESSING", createdAt: job.created_at, jobType: job.job_type };
     emitState();
 
     tempFile = await downloadToTemp(job.source_url);
-    const printerName = job.printer_name || state.printerName || undefined;
-    await print(tempFile, {
-      copies: Math.max(1, Number(job.copies || 1)),
-      ...(printerName ? { printer: printerName } : {}),
-    });
+    await print(tempFile, printOptions(job));
 
     await api("/jobs", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobId: job.id, status: "PRINTED" }),
     });
-    state.lastJob = { id: job.id, status: "PRINTED", createdAt: job.created_at };
+    state.lastJob = { id: job.id, status: "PRINTED", createdAt: job.created_at, jobType: job.job_type };
     state.lastError = null;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha ao imprimir.";
@@ -206,10 +253,10 @@ async function pair(code) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 600,
-    height: 720,
-    minWidth: 540,
-    minHeight: 640,
+    width: 660,
+    height: 780,
+    minWidth: 600,
+    minHeight: 700,
     title: "Kryzer Print",
     autoHideMenuBar: true,
     webPreferences: {
@@ -225,10 +272,18 @@ ipcMain.handle("print:get-state", async () => publicState());
 ipcMain.handle("print:pair", async (_event, code) => pair(String(code || "").trim().toUpperCase()));
 ipcMain.handle("print:get-printers", async () => {
   const printers = await getPrinters();
-  return printers.map((printer) => ({ name: printer.name }));
+  return printers.map((printer) => ({ name: printer.name, paperSizes: printer.paperSizes || [] }));
 });
 ipcMain.handle("print:set-printer", async (_event, printerName) => {
   state.printerName = String(printerName || "").trim() || null;
+  await saveConfig();
+  await heartbeat();
+  return publicState();
+});
+ipcMain.handle("print:set-settings", async (_event, settings = {}) => {
+  state.labelPaperFormat = normalizePaperFormat(settings.labelPaperFormat, state.labelPaperFormat);
+  state.documentPaperFormat = normalizePaperFormat(settings.documentPaperFormat, state.documentPaperFormat);
+  if (typeof settings.autoPrintLabel === "boolean") state.autoPrintLabel = settings.autoPrintLabel;
   await saveConfig();
   await heartbeat();
   return publicState();
