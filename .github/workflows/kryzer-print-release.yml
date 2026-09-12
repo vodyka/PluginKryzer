@@ -1,0 +1,55 @@
+name: Publicar Kryzer Print
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "kryzer-print/**"
+      - ".github/workflows/kryzer-print-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: kryzer-print
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Gerar instalador Windows
+        run: npm run dist
+
+      - name: Guardar instalador no workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kryzer-Print-Windows
+          path: kryzer-print/dist/Kryzer-Print-Setup.exe
+          if-no-files-found: error
+
+      - name: Publicar download estável
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view kryzer-print-latest >/dev/null 2>&1; then
+            gh release create kryzer-print-latest \
+              --title "Kryzer Print para Windows" \
+              --notes "Instalador oficial do Kryzer Print para o Checkout Kryzer." \
+              --latest
+          fi
+          gh release upload kryzer-print-latest \
+            kryzer-print/dist/Kryzer-Print-Setup.exe \
+            --clobber
