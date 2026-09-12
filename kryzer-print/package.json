@@ -1,0 +1,56 @@
+{
+  "name": "kryzer-print",
+  "version": "0.1.1",
+  "description": "Agente local de impressão do Kryzer Checkout",
+  "main": "main.cjs",
+  "author": "Kryzer Digital",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "pdf-to-printer": "^5.6.0"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "br.com.kryzerdigital.print",
+    "productName": "Kryzer Print",
+    "asar": true,
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer.html",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "protocols": [
+      {
+        "name": "Kryzer Print",
+        "schemes": ["kryzer-print"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "Kryzer-Print-Setup.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Kryzer Print",
+      "runAfterFinish": true
+    }
+  }
+}
