@@ -4,17 +4,27 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { print, getPrinters } = require("pdf-to-printer");
+const { WebSocketServer } = require("ws");
 
 const API_BASE = process.env.KRYZER_PRINT_API || "https://app.kryzerdigital.com.br/api/kryzer-print";
 const API_ORIGIN = new URL(API_BASE).origin;
 const APP_VERSION = app.getVersion();
 const PROTOCOL = "kryzer-print";
 const PAPER_FORMATS = new Set(["10X15", "A4", "PRINTER_DEFAULT"]);
+const UNIFIED_PORT = 21320;
+const UNIFIED_ACCOUNTS = new Map([
+  ["30945", { name: "MASTER", role: "MASTER", warehouse: "*" }],
+  ["34552", { name: "Moto Cintra", role: "CLIENT", warehouse: "Master" }],
+  ["33745", { name: "Giro X", role: "CLIENT", warehouse: "Master" }],
+]);
 
 let mainWindow = null;
 let heartbeatTimer = null;
 let jobsTimer = null;
 let busy = false;
+let unifiedServer = null;
+const unifiedSockets = new Map();
+const unifiedSnapshots = new Map();
 let state = {
   paired: false,
   connected: false,
@@ -99,6 +109,13 @@ function publicState() {
     lastJob: state.lastJob,
     appVersion: APP_VERSION,
     computerName: os.hostname(),
+    unifiedPort: UNIFIED_PORT,
+    unifiedConnections: [...unifiedSockets.values()].filter(Boolean).map(meta => ({
+      puid: meta.puid,
+      name: meta.name,
+      role: meta.role,
+      connectedAt: meta.connectedAt,
+    })),
   };
 }
 
@@ -142,6 +159,117 @@ async function heartbeat() {
     state.lastError = error instanceof Error ? error.message : "Falha ao conectar ao Kryzer.";
   }
   emitState();
+}
+
+
+function unifiedPayload() {
+  const now = Date.now();
+  const sources = [...UNIFIED_ACCOUNTS.entries()].map(([puid, config]) => {
+    const connected = [...unifiedSockets.values()].some(meta => meta?.puid === puid);
+    const snapshot = unifiedSnapshots.get(puid) || null;
+    return {
+      puid,
+      name: config.name,
+      role: config.role,
+      warehouse: config.warehouse,
+      connected,
+      updatedAt: snapshot?.updatedAt || null,
+      stale: !snapshot?.updatedAt || (now - new Date(snapshot.updatedAt).getTime()) > 90000,
+      orders: Array.isArray(snapshot?.orders) ? snapshot.orders : [],
+    };
+  });
+  return { type: "unified_state", generatedAt: new Date().toISOString(), sources };
+}
+
+function broadcastUnifiedState() {
+  const payload = JSON.stringify(unifiedPayload());
+  for (const [socket, meta] of unifiedSockets.entries()) {
+    if (meta?.puid !== "30945" || socket.readyState !== 1) continue;
+    try { socket.send(payload); } catch {}
+  }
+  emitState();
+}
+
+function startUnifiedBridge() {
+  if (unifiedServer) return;
+  try {
+    unifiedServer = new WebSocketServer({ host: "127.0.0.1", port: UNIFIED_PORT });
+  } catch (error) {
+    state.lastError = `Falha ao iniciar Checkout Unificado na porta ${UNIFIED_PORT}: ${error?.message || error}`;
+    emitState();
+    return;
+  }
+
+  unifiedServer.on("connection", socket => {
+    unifiedSockets.set(socket, null);
+
+    socket.on("message", raw => {
+      let message;
+      try { message = JSON.parse(String(raw || "{}")); } catch { return; }
+
+      if (message.type === "register") {
+        const puid = String(message.puid || "").trim();
+        const allowed = UNIFIED_ACCOUNTS.get(puid);
+        if (!allowed) {
+          try { socket.send(JSON.stringify({ type: "error", error: "PUID_NOT_ALLOWED" })); } catch {}
+          try { socket.close(1008, "PUID não autorizado"); } catch {}
+          return;
+        }
+        unifiedSockets.set(socket, {
+          puid,
+          name: allowed.name,
+          role: allowed.role,
+          connectedAt: new Date().toISOString(),
+        });
+        try {
+          socket.send(JSON.stringify({
+            type: "registered",
+            puid,
+            name: allowed.name,
+            role: allowed.role,
+            warehouse: allowed.warehouse,
+            port: UNIFIED_PORT,
+          }));
+          if (puid === "30945") socket.send(JSON.stringify(unifiedPayload()));
+        } catch {}
+        broadcastUnifiedState();
+        return;
+      }
+
+      const meta = unifiedSockets.get(socket);
+      if (!meta) return;
+
+      if (message.type === "snapshot") {
+        const puid = String(message.puid || meta.puid);
+        if (puid !== meta.puid || !UNIFIED_ACCOUNTS.has(puid)) return;
+        unifiedSnapshots.set(puid, {
+          updatedAt: new Date().toISOString(),
+          orders: Array.isArray(message.orders) ? message.orders : [],
+        });
+        broadcastUnifiedState();
+        return;
+      }
+
+      if (message.type === "ping") {
+        try { socket.send(JSON.stringify({ type: "pong", at: new Date().toISOString() })); } catch {}
+      }
+    });
+
+    socket.on("close", () => {
+      unifiedSockets.delete(socket);
+      broadcastUnifiedState();
+    });
+    socket.on("error", () => {});
+  });
+
+  unifiedServer.on("listening", () => {
+    state.lastError = null;
+    emitState();
+  });
+  unifiedServer.on("error", error => {
+    state.lastError = `Checkout Unificado: ${error?.message || error}`;
+    emitState();
+  });
 }
 
 async function downloadToTemp(url) {
@@ -301,6 +429,7 @@ app.whenReady().then(async () => {
     app.setAsDefaultProtocolClient(PROTOCOL);
   }
   await loadConfig();
+  startUnifiedBridge();
   createWindow();
   await heartbeat();
   await processJobs();
@@ -316,5 +445,6 @@ app.on("activate", () => {
 app.on("window-all-closed", () => {
   clearInterval(heartbeatTimer);
   clearInterval(jobsTimer);
+  try { unifiedServer?.close(); } catch {}
   app.quit();
 });
