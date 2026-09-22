@@ -142,7 +142,14 @@ function initUnifiedCheckoutModule() {
           puid: currentPuid,
           account: currentAccount.name,
           role: currentAccount.role,
-          orders: orders,
+          orders: [
+            ...orders,
+            {
+              __kzDiagnostic: true,
+              sourcePuid: currentPuid,
+              diagnostics,
+            }
+          ],
           diagnostics,
         }));
       }
@@ -238,7 +245,9 @@ function initUnifiedCheckoutModule() {
       const live = knownSources.find(row => String(row.puid) === puid) || {};
       const isLocalMaster = puid === MASTER_PUID && currentPuid === MASTER_PUID;
       const localOrders = isLocalMaster ? localMasterOrders : [];
-      const liveOrders = Array.isArray(live.orders) ? live.orders : [];
+      const rawLiveOrders = Array.isArray(live.orders) ? live.orders : [];
+      const sentinel = rawLiveOrders.find(row => row && row.__kzDiagnostic === true);
+      const liveOrders = rawLiveOrders.filter(row => !(row && row.__kzDiagnostic === true));
       sourceMap.set(puid, {
         puid: puid,
         name: config.name,
@@ -248,7 +257,7 @@ function initUnifiedCheckoutModule() {
         stale: isLocalMaster ? !localMasterUpdatedAt : live.stale !== false,
         updatedAt: isLocalMaster ? localMasterUpdatedAt : (live.updatedAt || null),
         orders: isLocalMaster ? localOrders : liveOrders,
-        diagnostics: isLocalMaster ? localMasterDiagnostics : (live.diagnostics || null),
+        diagnostics: isLocalMaster ? localMasterDiagnostics : (live.diagnostics || sentinel?.diagnostics || null),
       });
     });
     return [...sourceMap.values()];
