@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.3.0";
+  const VERSION = "0.4.0";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -29,8 +29,12 @@ function initUnifiedCheckoutModule() {
   let masterWarehouseId = "";
   let warehouseRegistryAt = 0;
   let searchText = "";
-  let categoryFilter = "all";
+  let categoryFilter = "single1";
   let sourceFilter = "all";
+  let channelFilter = "all";
+  let onlyTodayFilter = false;
+  let priorityFirstFilter = true;
+  let skuQueueSearch = "";
   let checkoutSession = null;
   let lastScanMessage = "";
   let lastScanType = "info";
@@ -1043,6 +1047,98 @@ function initUnifiedCheckoutModule() {
       await publishSnapshot(true);
       renderSourcePage();
     });
+  }
+
+
+  function classicBaseOrders() {
+    let rows = allOrders();
+    if (sourceFilter !== "all") rows = rows.filter(order => String(order.sourcePuid) === String(sourceFilter));
+    if (channelFilter !== "all") rows = rows.filter(order => norm(order.channel).toLowerCase() === channelFilter);
+    if (onlyTodayFilter) rows = rows.filter(order => order.dueToday === true);
+    if (searchText) {
+      const q = fold(searchText);
+      rows = rows.filter(order => [
+        order.orderNo, order.sku, order.title, order.shopName, order.sourceName, order.channel,
+        ...(order.realItems || []).flatMap(item => [item.sku, item.title, ...(item.scanAliases || [])]),
+      ].map(fold).join(" ").includes(q));
+    }
+    if (priorityFirstFilter) {
+      rows = [...rows].sort((a,b) => {
+        const da = a.deadlineAt ? new Date(a.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        const db = b.deadlineAt ? new Date(b.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        return da - db;
+      });
+    }
+    return rows;
+  }
+
+  function classicCounts(rows) {
+    const counts = { single1:0, singleMany:0, multiple:0, unknown:0 };
+    rows.forEach(order => {
+      if (Object.prototype.hasOwnProperty.call(counts, order.category)) counts[order.category]++;
+      else counts.unknown++;
+    });
+    return counts;
+  }
+
+  function classicChannelLabel(channel) {
+    const key = norm(channel).toLowerCase();
+    const labels = { mercado:"Mercado Livre", mercadolivre:"Mercado Livre", shopee:"Shopee", kwai:"Kwai", shein:"Shein", tiktok:"TikTok" };
+    return labels[key] || (key ? key.charAt(0).toUpperCase() + key.slice(1) : "Outro");
+  }
+
+  function classicChannels(rows) {
+    const map = new Map();
+    rows.forEach(order => {
+      const key = norm(order.channel).toLowerCase();
+      if (key) map.set(key, (map.get(key) || 0) + 1);
+    });
+    return [...map.entries()].map(([id,count]) => ({ id, label: classicChannelLabel(id), count }))
+      .sort((a,b) => a.label.localeCompare(b.label, "pt-BR"));
+  }
+
+  function classicSkuQueue(rows) {
+    const map = new Map();
+    rows.forEach(order => {
+      orderItemsForScan(order).forEach(item => {
+        const sku = norm(item.sku);
+        if (!sku) return;
+        if (!map.has(sku)) map.set(sku,{sku,title:item.title||order.title||"",image:item.image||order.image||"",qty:0,origins:new Set()});
+        const row = map.get(sku);
+        row.qty += Number(item.qty || 0);
+        if (order.sourceName) row.origins.add(order.sourceName);
+      });
+    });
+    const q = fold(skuQueueSearch);
+    return [...map.values()]
+      .map(row => ({...row,origins:[...row.origins]}))
+      .filter(row => !q || fold([row.sku,row.title,...row.origins].join(" ")).includes(q))
+      .sort((a,b) => a.sku.localeCompare(b.sku,"pt-BR",{numeric:true,sensitivity:"base"}));
+  }
+
+  function ensureClassicCss() {
+    if (document.getElementById("kzu-classic-css")) return;
+    const style = document.createElement("style");
+    style.id = "kzu-classic-css";
+    style.textContent =
+      "#kzu-root.kzu-classic{background:#f5f5f5;color:#262626;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif}" +
+      ".kzu-cl-head{height:68px;background:#fff;border-bottom:1px solid #ededed;display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:20}" +
+      ".kzu-cl-brand{display:flex;align-items:center;gap:12px}.kzu-cl-logo{width:32px;height:32px;border-radius:7px;background:#000;color:#fff;display:grid;place-items:center;font-weight:900}.kzu-cl-title{font-size:18px;font-weight:700}.kzu-cl-ver{font-size:10px;color:#8c8c8c;margin-top:2px}" +
+      ".kzu-cl-pill{display:flex;align-items:center;gap:7px;border:1px solid #d9f7be;background:#f6ffed;color:#389e0d;border-radius:999px;padding:8px 12px;font-size:11px;font-weight:600}.kzu-cl-pill.off{border-color:#ffd8bf;background:#fff7e6;color:#d46b08}.kzu-cl-pill i{width:7px;height:7px;border-radius:50%;background:currentColor}" +
+      ".kzu-cl-body{display:grid;grid-template-columns:228px minmax(560px,1fr) 280px;gap:16px;padding:16px 18px 28px;max-width:1800px;margin:0 auto;align-items:start}.kzu-cl-side,.kzu-cl-main,.kzu-cl-right{min-width:0}" +
+      ".kzu-cl-card{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:12px}.kzu-cl-st{font-size:13px;font-weight:700;margin-bottom:12px}.kzu-cl-label{font-size:11px;color:#595959;margin-bottom:6px;display:block}.kzu-cl-select,.kzu-cl-input{width:100%;height:38px;border:1px solid #d9d9d9;border-radius:4px;padding:0 10px;background:#fff;box-sizing:border-box}" +
+      ".kzu-cl-sidebtn{width:100%;height:36px;border:1px solid #d9d9d9;background:#fff;border-radius:4px;margin-top:8px;cursor:pointer;font-size:11px;text-align:left;padding:0 10px;display:flex;align-items:center;justify-content:space-between}.kzu-cl-sidebtn.primary{background:#1677ff;border-color:#1677ff;color:#fff;justify-content:center}.kzu-cl-sidebtn:disabled{opacity:.5}" +
+      ".kzu-cl-prio{display:grid;grid-template-columns:1fr 1fr;gap:8px}.kzu-cl-prio button{height:34px;border:1px solid #d9d9d9;background:#fff;border-radius:4px;font-size:10px}.kzu-cl-prio button.active{background:#1677ff;border-color:#1677ff;color:#fff}" +
+      ".kzu-cl-origin{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f0f0f0;cursor:pointer}.kzu-cl-origin.off{opacity:.45}.kzu-cl-origin.active b{color:#1677ff}.kzu-cl-origin b{display:block;font-size:11px}.kzu-cl-origin small{font-size:9px;color:#8c8c8c}.kzu-cl-origin em{font-style:normal;font-size:15px;font-weight:700;color:#1677ff}" +
+      ".kzu-cl-top{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:20px;margin-bottom:12px}.kzu-cl-eye{font-size:10px;color:#1677ff;font-weight:700}.kzu-cl-h1{font-size:20px;font-weight:700;margin-top:4px}.kzu-cl-sub{font-size:11px;color:#8c8c8c;margin-top:3px}.kzu-cl-scan{display:grid;grid-template-columns:42px 1fr auto;border:2px solid #1677ff;border-radius:5px;height:48px;margin-top:18px;overflow:hidden}.kzu-cl-scan span{display:grid;place-items:center;border-right:1px solid #e6f4ff;color:#1677ff}.kzu-cl-scan input{border:0;outline:0;padding:0 14px;font-size:16px}.kzu-cl-scan b{display:grid;place-items:center;padding:0 14px;font-size:9px;color:#8c8c8c}" +
+      ".kzu-cl-msg{margin-top:10px;padding:9px 10px;border-radius:4px;background:#e6f4ff;color:#1677ff;font-size:10px}.kzu-cl-msg.error{background:#fff1f0;color:#cf1322}.kzu-cl-msg.success{background:#f6ffed;color:#389e0d}" +
+      ".kzu-cl-market,.kzu-cl-work{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:0 20px;margin-bottom:12px}.kzu-cl-marketbar{display:flex;gap:8px;align-items:center;padding:10px 0;overflow-x:auto}.kzu-cl-marketbar>small{color:#8c8c8c}.kzu-cl-marketbtn{height:38px;border:1px solid #d9d9d9;background:#fff;border-radius:4px;padding:0 12px;font-size:10px}.kzu-cl-marketbtn.active{border-color:#1677ff;color:#1677ff;background:#f0f5ff}.kzu-cl-marketbtn i{font-style:normal;margin-left:4px;background:#f5f5f5;border-radius:9px;padding:2px 5px}" +
+      ".kzu-cl-tabs{display:flex;border-bottom:1px solid #f0f0f0}.kzu-cl-tab{position:relative;min-width:190px;border:0;background:transparent;padding:16px 42px 13px 0;text-align:left;color:#595959}.kzu-cl-tab+.kzu-cl-tab{margin-left:26px}.kzu-cl-tab span{display:block;font-size:12px}.kzu-cl-tab small{display:block;font-size:9px;color:#8c8c8c;margin-top:2px}.kzu-cl-tab b{position:absolute;right:4px;top:17px;min-width:22px;height:22px;border-radius:11px;background:#f5f5f5;display:grid;place-items:center;font-size:10px}.kzu-cl-tab.active{color:#1677ff}.kzu-cl-tab.active:after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#1677ff}.kzu-cl-tab.active b{background:#e6f4ff;color:#1677ff}" +
+      ".kzu-cl-listhead{padding:16px 0 10px;display:flex;align-items:center;justify-content:space-between}.kzu-cl-listhead strong{font-size:14px}.kzu-cl-list{border:1px solid #eee;border-radius:6px;overflow:hidden;margin-bottom:18px}.kzu-cl-row{display:grid;grid-template-columns:48px minmax(0,1fr) 100px;gap:12px;align-items:center;min-height:68px;padding:10px 12px;border-bottom:1px solid #f0f0f0}.kzu-cl-row:last-child{border-bottom:0}.kzu-cl-row img,.kzu-cl-ph{width:44px;height:44px;object-fit:contain;border:1px solid #eee;border-radius:5px;background:#fafafa}.kzu-cl-rowmain{min-width:0}.kzu-cl-sku{font-size:12px;font-weight:700}.kzu-cl-name{font-size:10px;color:#8c8c8c;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kzu-cl-meta{font-size:9px;color:#8c8c8c;margin-top:4px}.kzu-cl-meta strong{color:#1677ff}.kzu-cl-r{text-align:right}.kzu-cl-r b{font-size:13px}.kzu-cl-r small{display:block;font-size:9px;margin-top:3px}.kzu-cl-r .late{color:#cf1322}.kzu-cl-r .safe{color:#389e0d}" +
+      ".kzu-cl-empty{padding:36px;text-align:center;color:#8c8c8c;font-size:11px}.kzu-cl-rightcard{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:14px;position:sticky;top:84px}.kzu-cl-righthead{display:flex;justify-content:space-between;margin-bottom:10px}.kzu-cl-righthead b{font-size:14px}.kzu-cl-righthead small{font-size:9px;color:#1677ff}.kzu-cl-skurow{display:grid;grid-template-columns:38px 1fr auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0}.kzu-cl-skurow img,.kzu-cl-skuph{width:36px;height:36px;object-fit:contain;border:1px solid #eee;border-radius:4px}.kzu-cl-skucopy{min-width:0}.kzu-cl-skucopy b{display:block;font-size:11px}.kzu-cl-skucopy small{display:block;font-size:9px;color:#8c8c8c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kzu-cl-skuqty{font-size:14px;font-weight:700;color:#1677ff}" +
+      ".kzu-cl-session{border:1px solid #91caff;background:#f0f8ff;border-radius:7px;padding:12px;margin-top:12px}.kzu-cl-sessionhead{display:flex;justify-content:space-between}.kzu-cl-sessionline{display:grid;grid-template-columns:1fr auto;gap:10px;background:#fff;border:1px solid #e8e8e8;border-radius:5px;padding:7px 9px;margin-top:6px;font-size:10px}.kzu-cl-sessionline.done{background:#f6ffed;border-color:#b7eb8f}.kzu-cl-sessionactions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.kzu-cl-sessionactions button{height:34px;border:1px solid #d9d9d9;background:#fff;border-radius:4px;padding:0 12px}.kzu-cl-sessionactions .primary{background:#1677ff;border-color:#1677ff;color:#fff}" +
+      "@media(max-width:1150px){.kzu-cl-body{grid-template-columns:210px minmax(0,1fr)}.kzu-cl-right{grid-column:1/-1}.kzu-cl-rightcard{position:relative;top:auto}}@media(max-width:760px){.kzu-cl-body{grid-template-columns:1fr}.kzu-cl-tabs{overflow-x:auto}}";
+    document.head.appendChild(style);
   }
 
   function renderUnified() {
