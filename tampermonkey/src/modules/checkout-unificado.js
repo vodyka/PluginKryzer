@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.2.1";
+  const VERSION = "0.2.2";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -47,8 +47,16 @@ function initUnifiedCheckoutModule() {
 
   async function getCurrentPuid() {
     const response = await fetch("/api/home", { credentials: "include" });
+    const contentType = response.headers.get("content-type") || "";
+    if (!response.ok || !contentType.includes("application/json")) {
+      throw new Error("Não consegui ler /api/home nesta sessão.");
+    }
     const json = await response.json();
-    return norm(json && json.data && json.data.user && (json.data.user.puid || json.data.user.id));
+    return norm(
+      json && json.data && json.data.user && (json.data.user.puid || json.data.user.id) ||
+      json && json.user && (json.user.puid || json.user.id) ||
+      json && json.data && (json.data.puid || json.data.id)
+    );
   }
 
   function waitForCheckoutBridge(timeoutMs) {
@@ -467,6 +475,29 @@ function initUnifiedCheckoutModule() {
       }
     }
     throw new Error("Tempo esgotado aguardando o PDF da etiqueta.");
+  }
+
+  async function startLabelCollectorStandalone(orderNo) {
+    labelCollector = { status: "loading", orderNo, message: "Identificando a conta UpSeller atual...", url: "", order: null };
+    renderLabelCollector();
+
+    try {
+      const puid = await getCurrentPuid();
+      currentPuid = puid;
+      currentAccount = ACCOUNTS[currentPuid] || null;
+
+      if (currentPuid !== "34552") {
+        throw new Error("Este teste da etiqueta " + orderNo + " deve ser aberto na Moto Cintra (PUID 34552). PUID atual: " + (currentPuid || "não identificado") + ".");
+      }
+
+      labelCollector.message = "Moto Cintra identificada. Localizando o pedido...";
+      renderLabelCollector();
+      await runLabelCollector(orderNo);
+    } catch (error) {
+      labelCollector.status = "error";
+      labelCollector.message = error && error.message ? error.message : String(error);
+      renderLabelCollector();
+    }
   }
 
   async function runLabelCollector(orderNo) {
@@ -992,6 +1023,13 @@ function initUnifiedCheckoutModule() {
   }
 
   async function start() {
+    const labelOrderNo = labelTarget();
+    if (labelOrderNo) {
+      renderLabelCollector();
+      startLabelCollectorStandalone(labelOrderNo);
+      return;
+    }
+
     try {
       currentPuid = await getCurrentPuid();
     } catch (error) {
@@ -1011,17 +1049,16 @@ function initUnifiedCheckoutModule() {
     publishSnapshot(true);
     connectSocket();
 
-    if (labelTarget()) {
-      renderLabelCollector();
-      setTimeout(() => runLabelCollector(labelTarget()), 400);
-    }
-
     if (isUnifiedPage()) {
       injectStyles();
       renderUnified();
       renderSourcePage();
       setInterval(renderUnified, 10000);
     }
+  }
+
+  if (labelTarget() && document.body) {
+    try { renderLabelCollector(); } catch (_) {}
   }
 
   if (document.readyState === "loading") {
