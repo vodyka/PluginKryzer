@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.1.1";
+  const VERSION = "0.1.2";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -23,6 +23,9 @@ function initUnifiedCheckoutModule() {
   let localMasterUpdatedAt = null;
   let connectionError = "";
   let localMasterDiagnostics = null;
+  let warehouseRegistry = [];
+  let masterWarehouseId = "";
+  let warehouseRegistryAt = 0;
   let searchText = "";
   let categoryFilter = "all";
   let sourceFilter = "all";
@@ -53,21 +56,87 @@ function initUnifiedCheckoutModule() {
     });
   }
 
+  function extractWarehouseRows(json) {
+    const candidates = [
+      json && json.data,
+      json && json.data && json.data.list,
+      json && json.list,
+      json,
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+  }
+
+  async function loadWarehouseRegistry(force) {
+    const now = Date.now();
+    if (!force && warehouseRegistry.length && (now - warehouseRegistryAt) < 5 * 60 * 1000) {
+      return warehouseRegistry;
+    }
+    try {
+      const response = await fetch("/api/warehouse-sku/count", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "x-requested-with": "XMLHttpRequest",
+        },
+        body: JSON.stringify({ searchType: "1", isGroup: 0 }),
+      });
+      const json = await response.json();
+      if (!response.ok || (json && json.code != null && Number(json.code) !== 0)) {
+        throw new Error((json && json.msg) || ("HTTP " + response.status));
+      }
+      warehouseRegistry = extractWarehouseRows(json).map(row => ({
+        id: norm(row && (row.warehouseId || row.warehouseIdStr || row.id || row.idStr)),
+        name: norm(row && (row.warehouseName || row.name || row.title)),
+        count: Number(row && (row.cou ?? row.count ?? row.total ?? 0)),
+        isDefault: Boolean(row && (row.isDefault === true || Number(row.isDefault) === 1)),
+      })).filter(row => row.id);
+      warehouseRegistryAt = Date.now();
+
+      const master = warehouseRegistry.find(row => fold(row.name) === "MASTER");
+      masterWarehouseId = master ? master.id : "";
+
+      console.log("[Kryzer Unified] armazéns", currentPuid, warehouseRegistry, "Master:", masterWarehouseId || "não encontrado");
+      return warehouseRegistry;
+    } catch (error) {
+      console.warn("[Kryzer Unified] falha ao descobrir armazéns:", error);
+      warehouseRegistry = [];
+      masterWarehouseId = "";
+      warehouseRegistryAt = Date.now();
+      return [];
+    }
+  }
+
+  function warehouseNameById(id) {
+    const key = norm(id);
+    const row = warehouseRegistry.find(item => item.id === key);
+    return row ? row.name : "";
+  }
+
   function allowedWarehouse(order) {
     if (!currentAccount || currentAccount.role !== "CLIENT") return true;
+    const orderWarehouseId = norm(order && (order.warehouseId || order.warehouseIdStr));
+    if (masterWarehouseId) return orderWarehouseId === masterWarehouseId;
     return fold(order && order.warehouseName) === "MASTER";
   }
 
   function buildDiagnostics(all, filtered) {
     const warehouseCounts = {};
     (all || []).forEach(order => {
-      const name = norm(order && order.warehouseName) || "Sem armazém";
-      warehouseCounts[name] = (warehouseCounts[name] || 0) + 1;
+      const id = norm(order && (order.warehouseId || order.warehouseIdStr || order.warehouseName));
+      const resolvedName = warehouseNameById(id);
+      const label = resolvedName ? (resolvedName + " [" + id + "]") : (norm(order && order.warehouseName) || id || "Sem armazém");
+      warehouseCounts[label] = (warehouseCounts[label] || 0) + 1;
     });
     return {
       rawCount: Array.isArray(all) ? all.length : 0,
       filteredCount: Array.isArray(filtered) ? filtered.length : 0,
       warehouseCounts,
+      warehouseRegistry,
+      masterWarehouseId,
       currentPuid,
       accountName: currentAccount && currentAccount.name,
       role: currentAccount && currentAccount.role,
@@ -95,7 +164,7 @@ function initUnifiedCheckoutModule() {
       channel: norm(order.channel),
       shopName: norm(order.shopName),
       warehouseId: norm(order.warehouseId),
-      warehouseName: norm(order.warehouseName),
+      warehouseName: warehouseNameById(order.warehouseId) || norm(order.warehouseName),
       deadlineAt: norm(order.deadlineAt),
       priorityAt: norm(order.priorityAt),
       dueToday: order.dueToday === true,
@@ -127,6 +196,7 @@ function initUnifiedCheckoutModule() {
         try { await bridge.atualizarPedidosUnificado(); } catch (_) {}
       }
       const all = typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
+      if (currentAccount.role === "CLIENT") await loadWarehouseRegistry(false);
       const orders = serializeOrders(all);
       const diagnostics = buildDiagnostics(all, orders);
 
@@ -384,7 +454,10 @@ function initUnifiedCheckoutModule() {
       const status = source.connected ? (source.stale ? "Conectado · atualização atrasada" : "Conectado") : "Offline";
       const cls = source.connected ? "" : " off";
       const roleCls = source.role === "MASTER" ? " master" : " client";
-      const filterNote = source.role === "CLIENT" ? "Somente armazém Master" : "Centralizador";
+      const resolvedMasterId = source.diagnostics && source.diagnostics.masterWarehouseId ? source.diagnostics.masterWarehouseId : "";
+      const filterNote = source.role === "CLIENT"
+        ? ("Somente armazém Master" + (resolvedMasterId ? " · ID " + resolvedMasterId : ""))
+        : "Centralizador";
       const diag = source.diagnostics || null;
       const warehouseText = diag && diag.warehouseCounts
         ? Object.entries(diag.warehouseCounts).map(([name,count]) => name + ": " + count).join(" · ")
