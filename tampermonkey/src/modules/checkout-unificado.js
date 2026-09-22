@@ -1,14 +1,15 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.1.2";
+  const VERSION = "0.1.3";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
+  const SOURCE_PARAM = "kzUnifiedSource";
   const ACCOUNTS = {
     "30945": { name: "MASTER", role: "MASTER", warehouse: "*" },
-    "34552": { name: "Moto Cintra", role: "CLIENT", warehouse: "Master" },
-    "33745": { name: "Giro X", role: "CLIENT", warehouse: "Master" },
+    "34552": { name: "Moto Cintra", role: "CLIENT", warehouse: "Master", masterWarehouseId: "2374395576103698" },
+    "33745": { name: "Giro X", role: "CLIENT", warehouse: "Master", masterWarehouseId: "" },
   };
 
   let currentPuid = "";
@@ -31,6 +32,7 @@ function initUnifiedCheckoutModule() {
   let sourceFilter = "all";
 
   const isUnifiedPage = () => new URLSearchParams(location.search).get(PARAM) === "1";
+  const isSourcePage = () => new URLSearchParams(location.search).get(SOURCE_PARAM) === "1";
   const norm = value => String(value == null ? "" : value).trim();
   const fold = value => norm(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
   const escapeHtml = value => String(value == null ? "" : value)
@@ -57,16 +59,42 @@ function initUnifiedCheckoutModule() {
   }
 
   function extractWarehouseRows(json) {
-    const candidates = [
-      json && json.data,
-      json && json.data && json.data.list,
-      json && json.list,
-      json,
-    ];
-    for (const candidate of candidates) {
-      if (Array.isArray(candidate)) return candidate;
+    const rows = [];
+    const seen = new Set();
+
+    function walk(node, depth) {
+      if (!node || typeof node !== "object" || depth > 8 || seen.has(node)) return;
+      seen.add(node);
+
+      if (Array.isArray(node)) {
+        const warehouseLike = node.filter(row =>
+          row && typeof row === "object" &&
+          (row.warehouseId != null || row.warehouseIdStr != null) &&
+          (row.warehouseName != null || row.name != null || row.isDefault != null || row.cou != null)
+        );
+        if (warehouseLike.length) rows.push(...warehouseLike);
+        node.forEach(item => walk(item, depth + 1));
+        return;
+      }
+
+      if ((node.warehouseId != null || node.warehouseIdStr != null) &&
+          (node.warehouseName != null || node.name != null || node.isDefault != null || node.cou != null)) {
+        rows.push(node);
+      }
+
+      Object.values(node).forEach(value => {
+        if (value && typeof value === "object") walk(value, depth + 1);
+      });
     }
-    return [];
+
+    walk(json, 0);
+
+    const unique = new Map();
+    rows.forEach(row => {
+      const id = norm(row && (row.warehouseId || row.warehouseIdStr || row.id || row.idStr));
+      if (id && !unique.has(id)) unique.set(id, row);
+    });
+    return [...unique.values()];
   }
 
   async function loadWarehouseRegistry(force) {
@@ -96,10 +124,14 @@ function initUnifiedCheckoutModule() {
       })).filter(row => row.id);
       warehouseRegistryAt = Date.now();
 
-      const master = warehouseRegistry.find(row => fold(row.name) === "MASTER");
-      masterWarehouseId = master ? master.id : "";
+      const configuredMasterId = norm(currentAccount && currentAccount.masterWarehouseId);
+      const masterByName = warehouseRegistry.find(row => fold(row.name) === "MASTER");
+      const defaults = warehouseRegistry.filter(row => row.isDefault);
+      masterWarehouseId = configuredMasterId ||
+        (masterByName ? masterByName.id : "") ||
+        (defaults.length === 1 ? defaults[0].id : "");
 
-      console.log("[Kryzer Unified] armazéns", currentPuid, warehouseRegistry, "Master:", masterWarehouseId || "não encontrado");
+      console.log("[Kryzer Unified] armazéns", currentPuid, warehouseRegistry, "Master:", masterWarehouseId || "não encontrado", "override:", configuredMasterId || "nenhum");
       return warehouseRegistry;
     } catch (error) {
       console.warn("[Kryzer Unified] falha ao descobrir armazéns:", error);
@@ -227,10 +259,12 @@ function initUnifiedCheckoutModule() {
       connectionError = "";
       console.log("[Kryzer Unified] snapshot", currentPuid, orders.length, "de", all.length);
       renderUnified();
+      renderSourcePage();
     } catch (error) {
       connectionError = error && error.message ? error.message : String(error);
       console.warn("[Kryzer Unified] falha ao sincronizar:", error);
       renderUnified();
+      renderSourcePage();
     } finally {
       syncing = false;
     }
@@ -250,6 +284,7 @@ function initUnifiedCheckoutModule() {
     } catch (error) {
       connectionError = error && error.message ? error.message : "Falha ao abrir conexão local.";
       renderUnified();
+      renderSourcePage();
       scheduleReconnect();
       return;
     }
@@ -259,6 +294,7 @@ function initUnifiedCheckoutModule() {
       connectionError = "Kryzer Print não respondeu em 4 segundos na porta 21320.";
       try { socket.close(); } catch (_) {}
       renderUnified();
+      renderSourcePage();
     }, 4000);
 
     socket.addEventListener("open", () => {
@@ -279,6 +315,7 @@ function initUnifiedCheckoutModule() {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
       }, 15000);
       renderUnified();
+      renderSourcePage();
     });
 
     socket.addEventListener("message", event => {
@@ -287,11 +324,13 @@ function initUnifiedCheckoutModule() {
       if (message.type === "unified_state" && currentPuid === MASTER_PUID) {
         lastState = message;
         renderUnified();
+      renderSourcePage();
       }
       if (message.type === "error") {
         connectionError = "Kryzer Print recusou a conexão: " + String(message.error || "erro");
         console.warn("[Kryzer Unified]", message.error);
         renderUnified();
+      renderSourcePage();
       }
     });
 
@@ -299,11 +338,13 @@ function initUnifiedCheckoutModule() {
       clearTimeout(openTimeout);
       if (!connectionError) connectionError = "Kryzer Print local não está conectado.";
       renderUnified();
+      renderSourcePage();
       scheduleReconnect();
     });
     socket.addEventListener("error", () => {
       if (!connectionError) connectionError = "Não foi possível conectar em ws://127.0.0.1:21320.";
       renderUnified();
+      renderSourcePage();
     });
   }
 
@@ -428,6 +469,48 @@ function initUnifiedCheckoutModule() {
     root.innerHTML = "<div><h1>Checkout Unificado Kryzer</h1><p>" + escapeHtml(message) + "</p></div>";
   }
 
+  function renderSourcePage() {
+    if (!isSourcePage()) return;
+    injectStyles();
+
+    let root = document.getElementById("kzu-root");
+    if (!root) {
+      root = document.createElement("div");
+      root.id = "kzu-root";
+      document.body.appendChild(root);
+    }
+
+    if (!currentPuid || !currentAccount) {
+      root.innerHTML = "<div class=\"kzu-page\"><div class=\"kzu-alert\"><span><b>Fonte não autorizada</b><small>Este PUID não participa do Checkout Unificado.</small></span></div></div>";
+      return;
+    }
+
+    const connected = socket && socket.readyState === WebSocket.OPEN;
+    const bridge = window.KZCheckoutRapido || (typeof unsafeWindow !== "undefined" ? unsafeWindow.KZCheckoutRapido : null);
+    const raw = bridge && typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
+    const filtered = serializeOrders(raw);
+    const warehouseText = warehouseRegistry.length
+      ? warehouseRegistry.map(row => (row.name || "Sem nome") + " [" + row.id + "]" + (row.isDefault ? " padrão" : "")).join(" · ")
+      : "Ainda não foi possível ler os armazéns.";
+
+    root.innerHTML =
+      "<div class=\"kzu-head\"><div class=\"kzu-brand\"><div class=\"kzu-logo\">K</div><div><div class=\"kzu-title\">Fonte do Checkout Unificado</div><div class=\"kzu-sub\">" +
+      escapeHtml(currentAccount.name) + " · PUID " + escapeHtml(currentPuid) + "</div></div></div>" +
+      "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? "Conectado ao Kryzer Print" : "Desconectado") + "</div></div>" +
+      "<div class=\"kzu-page\"><div class=\"kzu-source client\" style=\"margin-bottom:14px\"><span><strong>" + escapeHtml(currentAccount.name) + "</strong>" +
+      "<small>PUID " + escapeHtml(currentPuid) + "</small>" +
+      "<div class=\"kzu-diag\"><b>Pedidos brutos:</b> " + raw.length + " · <b>Enviados ao MASTER:</b> " + filtered.length +
+      "<br><b>Master ID:</b> " + escapeHtml(masterWarehouseId || "não identificado") +
+      "<br>" + escapeHtml(warehouseText) + "</div></span><span class=\"count\">" + filtered.length + "</span></div>" +
+      "<div class=\"kzu-toolbar\"><button id=\"kzu-source-refresh\" class=\"kzu-btn active\">Atualizar e reenviar agora</button></div></div>";
+
+    root.querySelector("#kzu-source-refresh")?.addEventListener("click", async () => {
+      await loadWarehouseRegistry(true);
+      await publishSnapshot(true);
+      renderSourcePage();
+    });
+  }
+
   function renderUnified() {
     if (!isUnifiedPage()) return;
     injectStyles();
@@ -523,6 +606,7 @@ function initUnifiedCheckoutModule() {
       search.addEventListener("input", event => {
         searchText = event.target.value;
         renderUnified();
+      renderSourcePage();
         const next = document.getElementById("kzu-search");
         if (next) {
           next.focus();
@@ -541,15 +625,18 @@ function initUnifiedCheckoutModule() {
       button.onclick = () => {
         sourceFilter = sourceFilter === button.dataset.source ? "all" : button.dataset.source;
         renderUnified();
+      renderSourcePage();
       };
     });
     root.querySelector("#kzu-clear-source")?.addEventListener("click", () => {
       sourceFilter = "all";
       renderUnified();
+      renderSourcePage();
     });
     root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
       await publishSnapshot(true);
       renderUnified();
+      renderSourcePage();
     });
     root.querySelector("#kzu-open-print")?.addEventListener("click", () => {
       try { location.href = "kryzer-print://open"; } catch (_) {}
@@ -580,6 +667,7 @@ function initUnifiedCheckoutModule() {
     if (isUnifiedPage()) {
       injectStyles();
       renderUnified();
+      renderSourcePage();
       setInterval(renderUnified, 10000);
     }
   }
