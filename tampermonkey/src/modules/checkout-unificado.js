@@ -1,11 +1,12 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.1";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
   const SOURCE_PARAM = "kzUnifiedSource";
+  const LABEL_PARAM = "kzCollectLabel";
   const ACCOUNTS = {
     "30945": { name: "MASTER", role: "MASTER", warehouse: "*" },
     "34552": { name: "Moto Cintra", role: "CLIENT", warehouse: "Master", masterWarehouseId: "2374395576103698" },
@@ -33,9 +34,11 @@ function initUnifiedCheckoutModule() {
   let checkoutSession = null;
   let lastScanMessage = "";
   let lastScanType = "info";
+  let labelCollector = { status: "idle", orderNo: "", message: "", url: "", order: null };
 
   const isUnifiedPage = () => new URLSearchParams(location.search).get(PARAM) === "1";
   const isSourcePage = () => new URLSearchParams(location.search).get(SOURCE_PARAM) === "1";
+  const labelTarget = () => norm(new URLSearchParams(location.search).get(LABEL_PARAM));
   const norm = value => String(value == null ? "" : value).trim();
   const fold = value => norm(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
   const escapeHtml = value => String(value == null ? "" : value)
@@ -351,6 +354,188 @@ function initUnifiedCheckoutModule() {
     });
   }
 
+
+
+  function extractOrderListFromResponse(json) {
+    const candidates = [
+      json && json.data && json.data.list,
+      json && json.data && json.data.records,
+      json && json.data && json.data.orderList,
+      json && json.data && json.data.page && json.data.page.list,
+      json && json.list,
+      json && json.records,
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+  }
+
+  async function postFormUnified(url, params) {
+    const response = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      throw new Error("A sessão do UpSeller não retornou JSON. Faça login novamente nesta conta.");
+    }
+    const json = await response.json();
+    if (!response.ok) throw new Error((json && json.msg) || ("HTTP " + response.status));
+    return json;
+  }
+
+  async function findOrderByVisibleNumber(orderNo) {
+    const target = norm(orderNo).toUpperCase();
+    const attempts = [
+      { orderState: "in_process", labelStatus: "success" },
+      { orderState: "in_process" },
+      { orderState: "allocate" },
+      {},
+    ];
+
+    for (const extra of attempts) {
+      const body = new URLSearchParams();
+      const params = {
+        timeType: 0,
+        searchType: 0,
+        searchValue: target,
+        sortName: 1,
+        sortValue: 0,
+        isVoided: 0,
+        pageNum: 1,
+        pageSize: 100,
+        warehouseType: 0,
+        ...extra,
+      };
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== "" && value != null) body.set(key, String(value));
+      });
+      const json = await postFormUnified("/api/order/index", body);
+      const list = extractOrderListFromResponse(json);
+      const exact = list.find(order => norm(order && (order.orderNumber || order.orderNo || order.commonNo || order.platformOrderNo)).toUpperCase() === target);
+      if (exact) return exact;
+    }
+    return null;
+  }
+
+  async function collectLabelUrl(order) {
+    const idStr = norm(order && (order.idStr || order.id));
+    const authIdStr = norm(order && (order.authIdStr || order.authId));
+    const orderNo = norm(order && (order.orderNumber || order.orderNo || order.commonNo || order.platformOrderNo));
+    if (!idStr) throw new Error("Pedido sem idStr interno.");
+    if (!authIdStr) throw new Error("Pedido " + (orderNo || idStr) + " sem authIdStr.");
+
+    const prepBody = new URLSearchParams();
+    prepBody.append("orderIdList[0]", idStr);
+    const prep = await postFormUnified("/api/order/get-print-label-order", prepBody);
+    if (prep && prep.code != null && Number(prep.code) !== 0) {
+      throw new Error(prep.msg || "Falha ao preparar etiqueta.");
+    }
+
+    const printBody = new URLSearchParams();
+    printBody.set("isCos", "1");
+    printBody.set("printIdStr", idStr);
+    printBody.set("authIdStr", authIdStr);
+    printBody.set("isBatchPrint", "1");
+    const printJson = await postFormUnified("/api/print-label", printBody);
+    const uuid = typeof printJson.data === "string"
+      ? printJson.data
+      : norm(printJson && printJson.data && (printJson.data.uuid || printJson.data.id) || printJson && printJson.uuid);
+    if (!uuid) throw new Error("O UpSeller não retornou o UUID da etiqueta.");
+
+    for (let attempt = 1; attempt <= 30; attempt++) {
+      labelCollector.message = "Gerando etiqueta · tentativa " + attempt + "/30";
+      renderLabelCollector();
+      await new Promise(resolve => setTimeout(resolve, 650));
+      const response = await fetch("/api/check-process?uuid=" + encodeURIComponent(uuid), { credentials: "include" });
+      const json = await response.json();
+      let processMsg = json && json.data && json.data.processMsg;
+      if (typeof processMsg === "string") {
+        try { processMsg = JSON.parse(processMsg); } catch (_) {}
+      }
+      if (processMsg && (processMsg.code === 1 || processMsg.code === "1")) {
+        const url = norm(processMsg.msg || processMsg.url || processMsg.data && processMsg.data.url);
+        if (!url) throw new Error("A etiqueta terminou sem URL de PDF.");
+        return new URL(url, location.origin).href;
+      }
+      if (processMsg && (processMsg.code === -1 || processMsg.code === "-1")) {
+        const fail = processMsg.msg || processMsg.data && processMsg.data.failList && processMsg.data.failList[0] && processMsg.data.failList[0].msg;
+        throw new Error(fail || "O UpSeller informou falha ao gerar a etiqueta.");
+      }
+    }
+    throw new Error("Tempo esgotado aguardando o PDF da etiqueta.");
+  }
+
+  async function runLabelCollector(orderNo) {
+    if (!orderNo || labelCollector.status === "loading") return;
+    labelCollector = { status: "loading", orderNo, message: "Localizando pedido na conta atual...", url: "", order: null };
+    renderLabelCollector();
+
+    try {
+      const order = await findOrderByVisibleNumber(orderNo);
+      if (!order) throw new Error("Pedido " + orderNo + " não foi encontrado nesta conta UpSeller.");
+
+      const orderWarehouseId = norm(order.warehouseIdStr || order.warehouseId || "");
+      labelCollector.order = {
+        idStr: norm(order.idStr || order.id),
+        authIdStr: norm(order.authIdStr || order.authId),
+        orderNo: norm(order.orderNumber || order.orderNo || order.commonNo || order.platformOrderNo),
+        shopName: norm(order.shopName),
+        warehouseId: orderWarehouseId,
+        warehouseName: warehouseNameById(orderWarehouseId) || norm(order.warehouseName),
+      };
+      labelCollector.message = "Pedido localizado. Solicitando PDF da etiqueta...";
+      renderLabelCollector();
+
+      const url = await collectLabelUrl(order);
+      labelCollector.status = "success";
+      labelCollector.url = url;
+      labelCollector.message = "Etiqueta coletada com sucesso. O pedido NÃO foi marcado como impresso.";
+    } catch (error) {
+      labelCollector.status = "error";
+      labelCollector.message = error && error.message ? error.message : String(error);
+    }
+    renderLabelCollector();
+  }
+
+  function renderLabelCollector() {
+    if (!labelTarget()) return;
+    injectStyles();
+    let root = document.getElementById("kzu-label-root");
+    if (!root) {
+      root = document.createElement("div");
+      root.id = "kzu-label-root";
+      root.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:#f5f6f8;overflow:auto;font-family:Inter,Arial,sans-serif;color:#172033";
+      document.body.appendChild(root);
+    }
+
+    const statusText = labelCollector.status === "success" ? "Etiqueta encontrada" :
+      labelCollector.status === "error" ? "Falha ao coletar" :
+      labelCollector.status === "loading" ? "Coletando etiqueta..." : "Aguardando";
+    const order = labelCollector.order || {};
+    root.innerHTML =
+      "<div style=\"max-width:850px;margin:50px auto;padding:0 20px\">" +
+        "<div style=\"background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:22px\">" +
+          "<div style=\"font-size:12px;font-weight:800;color:#667085\">TESTE DE ETIQUETA · SEM MARK-PRINT</div>" +
+          "<h1 style=\"font-size:24px;margin:8px 0 4px\">" + escapeHtml(labelCollector.orderNo || labelTarget()) + "</h1>" +
+          "<div style=\"color:#667085;margin-bottom:18px\">PUID atual: " + escapeHtml(currentPuid || "identificando...") + (currentAccount ? " · " + escapeHtml(currentAccount.name) : "") + "</div>" +
+          "<div style=\"padding:14px;border-radius:10px;background:" + (labelCollector.status === "error" ? "#fef3f2" : labelCollector.status === "success" ? "#ecfdf3" : "#f9fafb") + ";border:1px solid #eaecf0\">" +
+            "<b>" + escapeHtml(statusText) + "</b><div style=\"margin-top:5px;color:#475467\">" + escapeHtml(labelCollector.message || "") + "</div>" +
+          "</div>" +
+          (order.idStr ? "<div style=\"margin-top:16px;font-size:13px;line-height:1.7\"><b>idStr:</b> " + escapeHtml(order.idStr) + "<br><b>Loja:</b> " + escapeHtml(order.shopName || "-") + "<br><b>Armazém:</b> " + escapeHtml(order.warehouseName || order.warehouseId || "-") + "</div>" : "") +
+          (labelCollector.url ? "<div style=\"margin-top:18px\"><a href=\"" + escapeHtml(labelCollector.url) + "\" target=\"_blank\" rel=\"noopener\" style=\"display:inline-flex;align-items:center;height:44px;padding:0 16px;border-radius:8px;background:#101828;color:white;text-decoration:none;font-weight:800\">Abrir PDF da etiqueta</a><div style=\"margin-top:10px;font-size:11px;color:#667085;word-break:break-all\">" + escapeHtml(labelCollector.url) + "</div></div>" : "") +
+          (labelCollector.status === "error" ? "<div style=\"margin-top:18px\"><button id=\"kzu-label-retry\" class=\"kzu-btn active\">Tentar novamente</button></div>" : "") +
+        "</div>" +
+      "</div>";
+
+    root.querySelector("#kzu-label-retry")?.addEventListener("click", () => {
+      labelCollector = { status: "idle", orderNo: labelTarget(), message: "", url: "", order: null };
+      runLabelCollector(labelTarget());
+    });
+  }
 
   function normalizeScan(value) {
     return norm(value).toUpperCase().replace(/[\s-]+/g, "");
@@ -825,6 +1010,11 @@ function initUnifiedCheckoutModule() {
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
     publishSnapshot(true);
     connectSocket();
+
+    if (labelTarget()) {
+      renderLabelCollector();
+      setTimeout(() => runLabelCollector(labelTarget()), 400);
+    }
 
     if (isUnifiedPage()) {
       injectStyles();
