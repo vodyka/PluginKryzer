@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.2.2";
+  const VERSION = "0.3.0";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -35,6 +35,8 @@ function initUnifiedCheckoutModule() {
   let lastScanMessage = "";
   let lastScanType = "info";
   let labelCollector = { status: "idle", orderNo: "", message: "", url: "", order: null };
+  const pendingRemoteActions = new Map();
+  const pendingLocalPrints = new Map();
 
   const isUnifiedPage = () => new URLSearchParams(location.search).get(PARAM) === "1";
   const isSourcePage = () => new URLSearchParams(location.search).get(SOURCE_PARAM) === "1";
@@ -284,6 +286,109 @@ function initUnifiedCheckoutModule() {
     }
   }
 
+
+  function makeUnifiedRequestId(prefix) {
+    const random = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+    return (prefix || "req") + "-" + random;
+  }
+
+  function requestSourceAction(targetPuid, action, payload, timeoutMs = 55000) {
+    return new Promise((resolve, reject) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        reject(new Error("Kryzer Print/ponte local está desconectada."));
+        return;
+      }
+      const requestId = makeUnifiedRequestId("act");
+      const timer = setTimeout(() => {
+        pendingRemoteActions.delete(requestId);
+        reject(new Error("Tempo esgotado aguardando a conta de origem."));
+      }, timeoutMs);
+
+      pendingRemoteActions.set(requestId, { resolve, reject, timer });
+      socket.send(JSON.stringify({
+        type: "action_request",
+        requestId,
+        targetPuid: String(targetPuid || ""),
+        action,
+        payload: payload || {},
+      }));
+    });
+  }
+
+  function requestLocalPrint(url, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        reject(new Error("Kryzer Print está desconectado."));
+        return;
+      }
+      const requestId = makeUnifiedRequestId("print");
+      const timer = setTimeout(() => {
+        pendingLocalPrints.delete(requestId);
+        reject(new Error("Tempo esgotado aguardando a impressão."));
+      }, timeoutMs);
+      pendingLocalPrints.set(requestId, { resolve, reject, timer });
+      socket.send(JSON.stringify({
+        type: "unified_print_request",
+        requestId,
+        url,
+      }));
+    });
+  }
+
+  async function markOrderPrintedRemote(order) {
+    const body = new URLSearchParams();
+    body.set("isBatch", "0");
+    body.set("mark", "1");
+    body.set("markType", "0");
+    body.append("orderIdList[0]", norm(order && (order.idStr || order.id)));
+    const json = await postFormUnified("/api/order/mark-print", body);
+    if (json && json.code != null && Number(json.code) !== 0) {
+      throw new Error(json.msg || "Falha ao marcar pedido como impresso.");
+    }
+    return { ok: true };
+  }
+
+  async function executeSourceAction(message) {
+    const requestId = norm(message && message.requestId);
+    const action = norm(message && message.action);
+    const payload = message && message.payload || {};
+    if (!requestId || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+    try {
+      let result = null;
+
+      if (action === "collect_label") {
+        const order = payload.order || {};
+        const url = await collectLabelUrl(order);
+        result = { url };
+      } else if (action === "mark_print") {
+        result = await markOrderPrintedRemote(payload.order || {});
+        setTimeout(() => publishSnapshot(true), 500);
+      } else if (action === "refresh_snapshot") {
+        await publishSnapshot(true);
+        result = { ok: true };
+      } else {
+        throw new Error("Ação remota desconhecida: " + action);
+      }
+
+      socket.send(JSON.stringify({
+        type: "action_response",
+        requestId,
+        ok: true,
+        result,
+      }));
+    } catch (error) {
+      socket.send(JSON.stringify({
+        type: "action_response",
+        requestId,
+        ok: false,
+        error: error && error.message ? error.message : String(error),
+      }));
+    }
+  }
+
   function scheduleReconnect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connectSocket, 2500);
@@ -335,6 +440,31 @@ function initUnifiedCheckoutModule() {
     socket.addEventListener("message", event => {
       let message = null;
       try { message = JSON.parse(String(event.data || "{}")); } catch (_) { return; }
+      if (message.type === "action_request") {
+        executeSourceAction(message);
+        return;
+      }
+
+      if (message.type === "action_response") {
+        const pending = pendingRemoteActions.get(norm(message.requestId));
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pendingRemoteActions.delete(norm(message.requestId));
+        if (message.ok === true) pending.resolve(message.result || {});
+        else pending.reject(new Error(message.error || "Falha na conta de origem."));
+        return;
+      }
+
+      if (message.type === "unified_print_result") {
+        const pending = pendingLocalPrints.get(norm(message.requestId));
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pendingLocalPrints.delete(norm(message.requestId));
+        if (message.ok === true) pending.resolve(message);
+        else pending.reject(new Error(message.error || "Falha ao imprimir."));
+        return;
+      }
+
       if (message.type === "unified_state" && currentPuid === MASTER_PUID) {
         lastState = message;
         renderUnified();
@@ -608,12 +738,17 @@ function initUnifiedCheckoutModule() {
       sourcePuid: String(order.sourcePuid || ""),
       sourceName: order.sourceName || "",
       orderId: order.idStr,
+      authIdStr: order.authIdStr,
       orderNo: order.orderNo,
+      shopName: order.shopName || "",
+      warehouseId: order.warehouseId || "",
       required,
       scanned: {},
       items,
       startedAt: new Date().toISOString(),
       complete: false,
+      processing: false,
+      stage: "SCANNING",
     };
     lastScanMessage = "Pedido " + (order.orderNo || order.idStr) + " iniciado.";
     lastScanType = "info";
@@ -685,6 +820,64 @@ function initUnifiedCheckoutModule() {
     }
     startUnifiedCheckout(order, code);
     renderUnified();
+  }
+
+
+  async function finalizeUnifiedCheckout() {
+    if (!checkoutSession || !checkoutSession.complete || checkoutSession.processing) return;
+
+    const session = checkoutSession;
+    session.processing = true;
+    session.stage = "LABEL";
+    lastScanType = "info";
+    lastScanMessage = "Solicitando etiqueta à conta " + session.sourceName + "...";
+    renderUnified();
+
+    const orderPayload = {
+      idStr: session.orderId,
+      authIdStr: session.authIdStr,
+      orderNumber: session.orderNo,
+      orderNo: session.orderNo,
+      shopName: session.shopName,
+      warehouseId: session.warehouseId,
+    };
+
+    try {
+      const label = await requestSourceAction(session.sourcePuid, "collect_label", { order: orderPayload });
+      const pdfUrl = norm(label && label.url);
+      if (!pdfUrl) throw new Error("A conta de origem não devolveu o PDF da etiqueta.");
+
+      session.stage = "PRINT";
+      lastScanMessage = "Etiqueta recebida. Imprimindo no Kryzer Print...";
+      renderUnified();
+
+      await requestLocalPrint(pdfUrl);
+
+      session.stage = "MARK";
+      lastScanMessage = "Etiqueta impressa. Atualizando o pedido na conta de origem...";
+      renderUnified();
+
+      await requestSourceAction(session.sourcePuid, "mark_print", { order: orderPayload }, 30000);
+
+      lastScanMessage = "✓ " + session.orderNo + " separado e etiqueta impressa com sucesso.";
+      lastScanType = "success";
+      checkoutSession = null;
+
+      try {
+        await requestSourceAction(session.sourcePuid, "refresh_snapshot", {}, 15000);
+      } catch (_) {}
+      if (session.sourcePuid === MASTER_PUID) publishSnapshot(true).catch(() => {});
+      renderUnified();
+      setTimeout(() => document.getElementById("kzu-scanner")?.focus(), 80);
+    } catch (error) {
+      if (checkoutSession) {
+        checkoutSession.processing = false;
+        checkoutSession.stage = "ERROR";
+      }
+      lastScanMessage = "Erro em " + session.orderNo + ": " + (error && error.message ? error.message : String(error));
+      lastScanType = "error";
+      renderUnified();
+    }
   }
 
   function sourceSummary() {
@@ -937,7 +1130,7 @@ function initUnifiedCheckoutModule() {
             return "<span class=\"kzu-scan-item " + (done >= need ? "done" : "wait") + "\">" + escapeHtml(item.sku) + " · " + done + "/" + need + "</span>";
           }).join("") +
           "</div>" + (lastScanMessage ? "<div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\">" + escapeHtml(lastScanMessage) + "</div>" : "") +
-          (checkoutSession.complete ? "<div style=\"margin-top:12px\"><button id=\"kzu-finish-session\" class=\"kzu-btn active\">Pedido conferido · imprimir</button></div>" : "") + "</div>" : (lastScanMessage ? "<div class=\"kzu-session\" style=\"border-width:1px\"><div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\" style=\"margin:0\">" + escapeHtml(lastScanMessage) + "</div></div>" : "")) +
+          (checkoutSession.complete ? "<div style=\"margin-top:12px\"><button id=\"kzu-finish-session\" class=\"kzu-btn active\" " + (checkoutSession.processing ? "disabled" : "") + ">" + (checkoutSession.processing ? "Processando " + escapeHtml(checkoutSession.stage || "") + "..." : "Pedido conferido · imprimir etiqueta") + "</button></div>" : "") + "</div>" : (lastScanMessage ? "<div class=\"kzu-session\" style=\"border-width:1px\"><div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\" style=\"margin:0\">" + escapeHtml(lastScanMessage) + "</div></div>" : "")) +
         "<div class=\"kzu-toolbar\">" +
           "<input id=\"kzu-scanner\" class=\"kzu-scanner\" autocomplete=\"off\" placeholder=\"Bipe SKU / EAN e pressione Enter\">" +
           "<input id=\"kzu-search\" class=\"kzu-search\" autocomplete=\"off\" placeholder=\"Pesquisar pedido, SKU ou produto...\" value=\"" + escapeHtml(searchText) + "\">" +
@@ -968,17 +1161,14 @@ function initUnifiedCheckoutModule() {
     }
 
     root.querySelector("#kzu-cancel-session")?.addEventListener("click", () => {
+      if (checkoutSession?.processing) return;
       checkoutSession = null;
       lastScanMessage = "Separação cancelada.";
       lastScanType = "info";
       renderUnified();
     });
     root.querySelector("#kzu-finish-session")?.addEventListener("click", () => {
-      if (!checkoutSession || !checkoutSession.complete) return;
-      lastScanMessage = "Pedido " + checkoutSession.orderNo + " conferido. A impressão unificada será ligada na próxima etapa.";
-      lastScanType = "success";
-      checkoutSession = null;
-      renderUnified();
+      finalizeUnifiedCheckout();
     });
 
     const search = root.querySelector("#kzu-search");
