@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -50,6 +50,22 @@ function initUnifiedCheckoutModule() {
   const escapeHtml = value => String(value == null ? "" : value)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+
+  function masterWarehouseStorageKey() {
+    return "kzu_master_warehouse_" + norm(currentPuid || "");
+  }
+
+  function readStoredMasterWarehouseId() {
+    try { return norm(localStorage.getItem(masterWarehouseStorageKey())); } catch (_) { return ""; }
+  }
+
+  function saveStoredMasterWarehouseId(id) {
+    try {
+      const value = norm(id);
+      if (value) localStorage.setItem(masterWarehouseStorageKey(), value);
+      else localStorage.removeItem(masterWarehouseStorageKey());
+    } catch (_) {}
+  }
 
   async function getCurrentPuid() {
     const response = await fetch("/api/home", { credentials: "include" });
@@ -138,20 +154,29 @@ function initUnifiedCheckoutModule() {
       }
       warehouseRegistry = extractWarehouseRows(json).map(row => ({
         id: norm(row && (row.warehouseId || row.warehouseIdStr || row.id || row.idStr)),
-        name: norm(row && (row.warehouseName || row.name || row.title)),
-        count: Number(row && (row.cou ?? row.count ?? row.total ?? 0)),
-        isDefault: Boolean(row && (row.isDefault === true || Number(row.isDefault) === 1)),
+        name: norm(row && (
+          row.warehouseName || row.name || row.title || row.displayName ||
+          row.warehouseTitle || row.whName || row.storehouseName || row.label
+        )),
+        count: Number(row && (row.cou ?? row.count ?? row.total ?? row.skuCount ?? 0)),
+        isDefault: Boolean(row && (
+          row.isDefault === true || Number(row.isDefault) === 1 ||
+          row.defaultWarehouse === true || Number(row.defaultWarehouse) === 1 ||
+          row.isMain === true || Number(row.isMain) === 1
+        )),
       })).filter(row => row.id);
       warehouseRegistryAt = Date.now();
 
       const configuredMasterId = norm(currentAccount && currentAccount.masterWarehouseId);
+      const storedMasterId = readStoredMasterWarehouseId();
       const masterByName = warehouseRegistry.find(row => fold(row.name) === "MASTER");
       const defaults = warehouseRegistry.filter(row => row.isDefault);
       masterWarehouseId = configuredMasterId ||
+        storedMasterId ||
         (masterByName ? masterByName.id : "") ||
         (defaults.length === 1 ? defaults[0].id : "");
 
-      console.log("[Kryzer Unified] armazéns", currentPuid, warehouseRegistry, "Master:", masterWarehouseId || "não encontrado", "override:", configuredMasterId || "nenhum");
+      console.log("[Kryzer Unified] armazéns", currentPuid, warehouseRegistry, "Master:", masterWarehouseId || "não encontrado", "config:", configuredMasterId || "nenhum", "salvo:", storedMasterId || "nenhum");
       return warehouseRegistry;
     } catch (error) {
       console.warn("[Kryzer Unified] falha ao descobrir armazéns:", error);
@@ -187,6 +212,11 @@ function initUnifiedCheckoutModule() {
       rawCount: Array.isArray(all) ? all.length : 0,
       filteredCount: Array.isArray(filtered) ? filtered.length : 0,
       warehouseCounts,
+      warehouseOrderCounts: (all || []).reduce((acc, order) => {
+        const id = norm(order && (order.warehouseId || order.warehouseIdStr || order.warehouseName));
+        if (id) acc[id] = (acc[id] || 0) + 1;
+        return acc;
+      }, {}),
       warehouseRegistry,
       masterWarehouseId,
       currentPuid,
@@ -1027,9 +1057,23 @@ function initUnifiedCheckoutModule() {
     const bridge = window.KZCheckoutRapido || (typeof unsafeWindow !== "undefined" ? unsafeWindow.KZCheckoutRapido : null);
     const raw = bridge && typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
     const filtered = serializeOrders(raw);
-    const warehouseText = warehouseRegistry.length
-      ? warehouseRegistry.map(row => (row.name || "Sem nome") + " [" + row.id + "]" + (row.isDefault ? " padrão" : "")).join(" · ")
-      : "Ainda não foi possível ler os armazéns.";
+    const rawWarehouseCounts = raw.reduce((acc, order) => {
+      const id = norm(order && (order.warehouseId || order.warehouseIdStr || order.warehouseName));
+      if (id) acc[id] = (acc[id] || 0) + 1;
+      return acc;
+    }, {});
+    const warehouseHtml = warehouseRegistry.length
+      ? warehouseRegistry.map(row => {
+          const selected = row.id === masterWarehouseId;
+          const rawCount = Number(rawWarehouseCounts[row.id] || 0);
+          return "<div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid " + (selected ? "#12b76a" : "#e4e7ec") + ";border-radius:9px;background:" + (selected ? "#ecfdf3" : "#fff") + ";margin-top:8px\">" +
+            "<div><b>" + escapeHtml(row.name || "Armazém sem nome") + "</b><small style=\"display:block;color:#667085;margin-top:3px\">ID " + escapeHtml(row.id) + " · " + rawCount + " pedido(s) bruto(s)" + (row.isDefault ? " · padrão" : "") + "</small></div>" +
+            (selected
+              ? "<span style=\"font-size:11px;font-weight:800;color:#027a48\">MASTER ATUAL</span>"
+              : "<button class=\"kzu-btn\" data-set-master=\"" + escapeHtml(row.id) + "\">Usar como Master</button>") +
+          "</div>";
+        }).join("")
+      : "<div style=\"color:#667085;font-size:12px\">Ainda não foi possível ler os armazéns.</div>";
 
     root.innerHTML =
       "<div class=\"kzu-head\"><div class=\"kzu-brand\"><div class=\"kzu-logo\">K</div><div><div class=\"kzu-title\">Fonte do Checkout Unificado</div><div class=\"kzu-sub\">" +
@@ -1039,10 +1083,21 @@ function initUnifiedCheckoutModule() {
       "<small>PUID " + escapeHtml(currentPuid) + "</small>" +
       "<div class=\"kzu-diag\"><b>Pedidos brutos:</b> " + raw.length + " · <b>Enviados ao MASTER:</b> " + filtered.length +
       "<br><b>Master ID:</b> " + escapeHtml(masterWarehouseId || "não identificado") +
-      "<br>" + escapeHtml(warehouseText) + "</div></span><span class=\"count\">" + filtered.length + "</span></div>" +
+      "</div>" + warehouseHtml + "</span><span class=\"count\">" + filtered.length + "</span></div>" +
       "<div class=\"kzu-toolbar\"><button id=\"kzu-source-refresh\" class=\"kzu-btn active\">Atualizar e reenviar agora</button></div></div>";
 
-    root.querySelector("#kzu-source-refresh")?.addEventListener("click", async () => {
+    root.querySelectorAll("[data-set-master]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const id = norm(button.dataset.setMaster);
+        if (!id) return;
+        saveStoredMasterWarehouseId(id);
+        masterWarehouseId = id;
+        await publishSnapshot(true);
+        renderSourcePage();
+      });
+    });
+
+        root.querySelector("#kzu-source-refresh")?.addEventListener("click", async () => {
       await loadWarehouseRegistry(true);
       await publishSnapshot(true);
       renderSourcePage();
