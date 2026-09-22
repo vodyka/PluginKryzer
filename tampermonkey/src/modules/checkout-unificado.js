@@ -1141,9 +1141,11 @@ function initUnifiedCheckoutModule() {
     document.head.appendChild(style);
   }
 
+
   function renderUnified() {
     if (!isUnifiedPage()) return;
     injectStyles();
+    ensureClassicCss();
 
     if (!currentPuid) return;
     if (currentPuid !== MASTER_PUID) {
@@ -1151,94 +1153,130 @@ function initUnifiedCheckoutModule() {
       return;
     }
 
-    const sources = sourceSummary();
-    const orders = filteredOrders();
     const connected = socket && socket.readyState === WebSocket.OPEN;
-    const clientSources = sources.filter(source => source.role === "CLIENT");
-    const clientsOffline = clientSources.some(source => !source.connected);
+    const sources = sourceSummary();
+    const clientsOffline = sources.filter(source => source.role === "CLIENT").some(source => !source.connected);
+    const baseRows = classicBaseOrders();
+    const counts = classicCounts(baseRows);
+    const channels = classicChannels(baseRows);
+    const categoryRows = baseRows.filter(order => order.category === categoryFilter);
+    const queueRows = classicSkuQueue(categoryRows);
+
     let root = document.getElementById("kzu-root");
     if (!root) {
       root = document.createElement("div");
       root.id = "kzu-root";
       document.body.appendChild(root);
     }
+    root.className = "kzu-classic";
 
-    const sourceCards = sources.map(source => {
-      const status = source.connected ? (source.stale ? "Conectado · atualização atrasada" : "Conectado") : "Offline";
-      const cls = source.connected ? "" : " off";
-      const roleCls = source.role === "MASTER" ? " master" : " client";
-      const resolvedMasterId = source.diagnostics && source.diagnostics.masterWarehouseId ? source.diagnostics.masterWarehouseId : "";
-      const filterNote = source.role === "CLIENT"
-        ? ("Somente armazém Master" + (resolvedMasterId ? " · ID " + resolvedMasterId : ""))
-        : "Centralizador";
-      const diag = source.diagnostics || null;
-      const warehouseText = diag && diag.warehouseCounts
-        ? Object.entries(diag.warehouseCounts).map(([name,count]) => name + ": " + count).join(" · ")
-        : "";
-      const diagHtml = diag
-        ? "<div class=\"kzu-diag\"><b>Bruto:</b> " + Number(diag.rawCount || 0) + " · <b>Após filtro:</b> " + Number(diag.filteredCount || 0) +
-          (warehouseText ? "<br><span>" + escapeHtml(warehouseText) + "</span>" : "") + "</div>"
-        : (source.connected ? "<div class=\"kzu-diag\">Aguardando primeiro diagnóstico...</div>" : "<div class=\"kzu-diag bad\">Perfil/Agent não conectado ao Kryzer Print.</div>");
-      return "<button class=\"kzu-source" + cls + roleCls + "\" data-source=\"" + escapeHtml(source.puid) + "\">" +
-        "<span><strong>" + escapeHtml(source.name) + "</strong><small>PUID " + escapeHtml(source.puid) + " · " + escapeHtml(status) + "</small><small>" + escapeHtml(filterNote) + "</small>" + diagHtml + "</span>" +
-        "<span class=\"count\">" + source.orders.length + "</span></button>";
+    const originHtml = sources.map(source => {
+      const status = source.connected ? (source.stale ? "atrasado" : "conectado") : "offline";
+      return '<div class="kzu-cl-origin ' + (source.connected ? '' : 'off') + (sourceFilter === source.puid ? ' active' : '') + '" data-source="' + escapeHtml(source.puid) + '">' +
+        '<div><b>' + escapeHtml(source.name) + '</b><small>PUID ' + escapeHtml(source.puid) + ' · ' + escapeHtml(status) + '</small></div>' +
+        '<em>' + Number((source.orders || []).length) + '</em></div>';
     }).join("");
 
-    const categoryButtons = [
-      ["all", "Todos"],
-      ["single1", "Item único = 1"],
-      ["singleMany", "Item único > 1"],
-      ["multiple", "Múltiplos itens"],
-      ["unknown", "Análise pendente"]
-    ].map(item => "<button class=\"kzu-btn" + (categoryFilter === item[0] ? " active" : "") + "\" data-category=\"" + item[0] + "\">" + item[1] + "</button>").join("");
+    const channelHtml = [
+      '<button class="kzu-cl-marketbtn ' + (channelFilter === "all" ? "active" : "") + '" data-channel="all">Todos <i>' + baseRows.length + '</i></button>',
+      ...channels.map(ch => '<button class="kzu-cl-marketbtn ' + (channelFilter === ch.id ? "active" : "") + '" data-channel="' + escapeHtml(ch.id) + '">' + escapeHtml(ch.label) + ' <i>' + ch.count + '</i></button>')
+    ].join("");
 
-    const rows = orders.length ? orders.map(order => {
-      const items = order.realItems && order.realItems.length ? order.realItems : order.marketplaceItems || [];
-      const first = items[0] || {};
-      const skuText = order.sku || (items.length === 1 ? first.sku : items.map(item => item.sku).join(" + "));
-      const title = order.title || first.title || "Produto";
-      const image = order.image || first.image || "";
-      const deadline = deadlineText(order.deadlineAt);
-      const late = order.deadlineAt && new Date(order.deadlineAt).getTime() < Date.now();
-      return "<div class=\"kzu-row\" data-order-id=\"" + escapeHtml(order.idStr) + "\">" +
-        "<div class=\"kzu-origin\">" + escapeHtml(order.sourceName) + "<small>PUID " + escapeHtml(order.sourcePuid) + "</small></div>" +
-        "<div><div class=\"kzu-order\">" + escapeHtml(order.orderNo || order.idStr) + "</div><span class=\"kzu-badge\">" + escapeHtml(order.channel || "Canal") + "</span></div>" +
-        "<div class=\"kzu-product\">" + (image ? "<img src=\"" + escapeHtml(image) + "\" alt=\"\">" : "<span style=\"width:46px;height:46px;background:#f2f4f7;border-radius:7px\"></span>") +
-          "<span><b>" + escapeHtml(skuText || "SKU não identificado") + "</b><small>" + escapeHtml(title) + "</small></span></div>" +
-        "<div class=\"kzu-qty\">" + Number(order.totalQty || 0) + "</div>" +
-        "<div><b>" + escapeHtml(order.warehouseName || "Sem armazém") + "</b><small style=\"display:block;color:#667085;margin-top:3px\">" + escapeHtml(order.shopName || "") + "</small></div>" +
-        "<div class=\"kzu-deadline" + (late ? " late" : "") + "\">" + escapeHtml(deadline) + "</div>" +
-      "</div>";
-    }).join("") : "<div class=\"kzu-empty\">Nenhum pedido corresponde aos filtros atuais.</div>";
+    const tabHtml = [
+      ["single1","Item Único","Quantidade = 1",counts.single1],
+      ["singleMany","Item Único","Quantidade > 1",counts.singleMany],
+      ["multiple","Múltiplos Itens","Mais de um SKU",counts.multiple]
+    ].map(tab =>
+      '<button class="kzu-cl-tab ' + (categoryFilter === tab[0] ? "active" : "") + '" data-category="' + tab[0] + '">' +
+      '<span>' + tab[1] + '</span><small>' + tab[2] + '</small><b>' + tab[3] + '</b></button>'
+    ).join("");
+
+    let listHtml = "";
+    if (!categoryRows.length) {
+      listHtml = '<div class="kzu-cl-empty">Nenhum pedido nesta categoria.</div>';
+    } else if (categoryFilter === "multiple") {
+      listHtml = categoryRows.map(order => {
+        const items = orderItemsForScan(order);
+        const first = items[0] || {};
+        const summary = items.map(item => Number(item.qty || 0) + "× " + item.sku).join(" · ");
+        const d = classicDeadline(order);
+        return '<div class="kzu-cl-row">' +
+          (first.image ? '<img src="' + escapeHtml(first.image) + '">' : '<span class="kzu-cl-ph"></span>') +
+          '<div class="kzu-cl-rowmain"><div class="kzu-cl-sku">' + escapeHtml(order.orderNo || order.idStr) + '</div>' +
+          '<div class="kzu-cl-name">' + escapeHtml(summary || order.title || "Pedido") + '</div>' +
+          '<div class="kzu-cl-meta"><strong>' + escapeHtml(order.sourceName || "") + '</strong> · ' + escapeHtml(classicChannelLabel(order.channel)) + ' · ' + escapeHtml(order.shopName || "") + '</div></div>' +
+          '<div class="kzu-cl-r"><b>' + items.length + ' SKU</b><small class="' + d.cls + '">' + escapeHtml(d.text) + '</small></div></div>';
+      }).join("");
+    } else {
+      const grouped = new Map();
+      categoryRows.forEach(order => {
+        const item = orderItemsForScan(order)[0] || {};
+        const sku = norm(item.sku || order.sku);
+        if (!sku) return;
+        if (!grouped.has(sku)) grouped.set(sku,{sku,title:item.title||order.title||"",image:item.image||order.image||"",orders:[],units:0});
+        const row = grouped.get(sku);
+        row.orders.push(order);
+        row.units += Number(order.totalQty || item.qty || 0);
+      });
+      listHtml = [...grouped.values()].map(row => {
+        const sample = row.orders[0] || {};
+        const d = classicDeadline(sample);
+        const origins = [...new Set(row.orders.map(order => order.sourceName).filter(Boolean))].join(", ");
+        return '<div class="kzu-cl-row">' +
+          (row.image ? '<img src="' + escapeHtml(row.image) + '">' : '<span class="kzu-cl-ph"></span>') +
+          '<div class="kzu-cl-rowmain"><div class="kzu-cl-sku">' + escapeHtml(row.sku) + '</div>' +
+          '<div class="kzu-cl-name">' + escapeHtml(row.title || "Produto") + '</div>' +
+          '<div class="kzu-cl-meta"><strong>' + escapeHtml(origins) + '</strong> · ' + row.orders.length + ' pedido(s)</div></div>' +
+          '<div class="kzu-cl-r"><b>' + Number(row.units || 0) + ' un</b><small class="' + d.cls + '">' + escapeHtml(d.text) + '</small></div></div>';
+      }).join("");
+    }
+
+    const queueHtml = queueRows.length ? queueRows.map(row =>
+      '<div class="kzu-cl-skurow">' +
+      (row.image ? '<img src="' + escapeHtml(row.image) + '">' : '<span class="kzu-cl-skuph"></span>') +
+      '<div class="kzu-cl-skucopy"><b>' + escapeHtml(row.sku) + '</b><small>' + escapeHtml(row.title || "") + '</small><small>' + escapeHtml(row.origins.join(" · ")) + '</small></div>' +
+      '<div class="kzu-cl-skuqty">' + Number(row.qty || 0) + '</div></div>'
+    ).join("") : '<div class="kzu-cl-empty">Nenhum SKU.</div>';
+
+    let sessionHtml = "";
+    if (checkoutSession) {
+      const total = Object.values(checkoutSession.required || {}).reduce((sum,n) => sum + Number(n || 0),0);
+      const done = Object.values(checkoutSession.scanned || {}).reduce((sum,n) => sum + Number(n || 0),0);
+      const lines = checkoutSession.items.map(item => {
+        const read = Number(checkoutSession.scanned[item.sku] || 0);
+        const need = Number(checkoutSession.required[item.sku] || 0);
+        return '<div class="kzu-cl-sessionline ' + (read >= need ? 'done' : '') + '"><span><b>' + escapeHtml(item.sku) + '</b> · ' + escapeHtml(item.title || "") + '</span><b>' + read + '/' + need + '</b></div>';
+      }).join("");
+      sessionHtml = '<div class="kzu-cl-session"><div class="kzu-cl-sessionhead"><div><b>Pedido ' + escapeHtml(checkoutSession.orderNo) + ' · ' + escapeHtml(checkoutSession.sourceName) + '</b><div class="kzu-cl-sub">Conferência por bipagem</div></div><b style="color:#1677ff">' + done + '/' + total + '</b></div>' +
+        lines +
+        '<div class="kzu-cl-sessionactions"><button id="kzu-cancel-session" ' + (checkoutSession.processing ? 'disabled' : '') + '>Cancelar checkout</button>' +
+        (checkoutSession.complete ? '<button id="kzu-finish-session" class="primary" ' + (checkoutSession.processing ? 'disabled' : '') + '>' + (checkoutSession.processing ? 'Processando ' + escapeHtml(checkoutSession.stage || '') + '...' : 'Imprimir etiqueta') + '</button>' : '') +
+        '</div></div>';
+    }
+
+    const msg = lastScanMessage || (baseRows.length ? "Aguardando leitura do próximo SKU..." : "Aguardando os pedidos para checkout...");
+    const msgClass = lastScanType === "error" ? " error" : lastScanType === "success" ? " success" : "";
+    const listTitle = categoryFilter === "single1" ? "Pedidos de item único" : categoryFilter === "singleMany" ? "Pedidos de item único com quantidade" : "Pedidos com múltiplos itens";
 
     root.innerHTML =
-      "<div class=\"kzu-head\">" +
-        "<div class=\"kzu-brand\"><div class=\"kzu-logo\">K</div><div><div class=\"kzu-title\">Checkout Unificado</div><div class=\"kzu-sub\">MASTER 30945 · Moto Cintra 34552 · Giro X 33745</div></div></div>" +
-        "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? "Kryzer Print conectado" : "Kryzer Print desconectado") + "</div>" +
-      "</div>" +
-      "<div class=\"kzu-page\">" +
-        ((!connected || clientsOffline) ? "<div class=\"kzu-alert\"><span><b>Conexão local incompleta</b><small>" + escapeHtml(connectionError || "O MASTER funciona localmente, mas Giro X e Moto Cintra precisam do Kryzer Print 0.3.0 aberto neste computador.") + "</small></span><button id=\"kzu-open-print\">Abrir Kryzer Print</button></div>" : "") +
-        "<div class=\"kzu-sources\">" + sourceCards + "</div>" +
-        (checkoutSession ? "<div class=\"kzu-session\"><div class=\"kzu-session-head\"><div><div class=\"kzu-session-title\">Separando " + escapeHtml(checkoutSession.orderNo) + " · " + escapeHtml(checkoutSession.sourceName) + "</div><div class=\"kzu-session-sub\">Leia todos os itens deste pedido antes de finalizar.</div></div><button id=\"kzu-cancel-session\" class=\"kzu-btn\">Cancelar</button></div><div class=\"kzu-session-items\">" +
-          checkoutSession.items.map(item => {
-            const done = Number(checkoutSession.scanned[item.sku] || 0);
-            const need = Number(checkoutSession.required[item.sku] || 0);
-            return "<span class=\"kzu-scan-item " + (done >= need ? "done" : "wait") + "\">" + escapeHtml(item.sku) + " · " + done + "/" + need + "</span>";
-          }).join("") +
-          "</div>" + (lastScanMessage ? "<div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\">" + escapeHtml(lastScanMessage) + "</div>" : "") +
-          (checkoutSession.complete ? "<div style=\"margin-top:12px\"><button id=\"kzu-finish-session\" class=\"kzu-btn active\" " + (checkoutSession.processing ? "disabled" : "") + ">" + (checkoutSession.processing ? "Processando " + escapeHtml(checkoutSession.stage || "") + "..." : "Pedido conferido · imprimir etiqueta") + "</button></div>" : "") + "</div>" : (lastScanMessage ? "<div class=\"kzu-session\" style=\"border-width:1px\"><div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\" style=\"margin:0\">" + escapeHtml(lastScanMessage) + "</div></div>" : "")) +
-        "<div class=\"kzu-toolbar\">" +
-          "<input id=\"kzu-scanner\" class=\"kzu-scanner\" autocomplete=\"off\" placeholder=\"Bipe SKU / EAN e pressione Enter\">" +
-          "<input id=\"kzu-search\" class=\"kzu-search\" autocomplete=\"off\" placeholder=\"Pesquisar pedido, SKU ou produto...\" value=\"" + escapeHtml(searchText) + "\">" +
-          categoryButtons +
-          "<button id=\"kzu-refresh\" class=\"kzu-btn\">Atualizar agora</button>" +
-          (sourceFilter !== "all" ? "<button id=\"kzu-clear-source\" class=\"kzu-btn active\">Fonte: " + escapeHtml(ACCOUNTS[sourceFilter] ? ACCOUNTS[sourceFilter].name : sourceFilter) + " ×</button>" : "") +
-        "</div>" +
-        "<div class=\"kzu-table\">" +
-          "<div class=\"kzu-row head\"><div>Origem</div><div>Pedido</div><div>Produto / SKU</div><div>Qtd.</div><div>Armazém</div><div>Prazo</div></div>" +
-          rows +
-        "</div>" +
-      "</div>";
+      '<div class="kzu-cl-head"><div class="kzu-cl-brand"><div class="kzu-cl-logo">K</div><div><div class="kzu-cl-title">Checkout por produto</div><div class="kzu-cl-ver">Kryzer Checkout Unificado · v' + VERSION + '</div></div></div>' +
+      '<div class="kzu-cl-pill ' + (connected ? '' : 'off') + '"><i></i>' + (connected ? 'Kryzer Print conectado' : 'Kryzer Print desconectado') + '</div></div>' +
+      '<div class="kzu-cl-body">' +
+        '<aside class="kzu-cl-side">' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Configuração</div><label class="kzu-cl-label">Impressora</label><select class="kzu-cl-select" disabled><option>Kryzer Print</option></select><button id="kzu-open-print" class="kzu-cl-sidebtn">Abrir Kryzer Print</button></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Prioridade</div><div class="kzu-cl-prio"><button id="kzu-today" class="' + (onlyTodayFilter ? 'active' : '') + '">Vence hoje</button><button id="kzu-priority" class="' + (priorityFirstFilter ? 'active' : '') + '">Prazo primeiro</button></div></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Origens</div>' + originHtml + '</div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>Mostrar todas as origens</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
+        '</aside>' +
+        '<main class="kzu-cl-main">' +
+          ((!connected || clientsOffline) ? '<div class="kzu-cl-msg error" style="margin:0 0 12px">Conexão incompleta: origens offline não entram na fila. O MASTER continua funcionando.</div>' : '') +
+          '<div class="kzu-cl-top"><div class="kzu-cl-eye">LEITURA RÁPIDA</div><div class="kzu-cl-h1">Escaneie o SKU para iniciar</div><div class="kzu-cl-sub">Os pedidos das contas conectadas são separados em uma única fila e a etiqueta é gerada na conta de origem.</div>' +
+          '<div class="kzu-cl-scan"><span>⌁</span><input id="kzu-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU"><b>ENTER</b></div><div class="kzu-cl-msg' + msgClass + '">' + escapeHtml(msg) + '</div>' + sessionHtml + '</div>' +
+          '<div class="kzu-cl-market"><div class="kzu-cl-marketbar"><small>Marketplaces</small>' + channelHtml + '</div></div>' +
+          '<div class="kzu-cl-work"><div class="kzu-cl-tabs">' + tabHtml + '</div><div class="kzu-cl-listhead"><div><strong>' + listTitle + '</strong><div class="kzu-cl-sub">Origem unificada: MASTER + Moto Cintra + Giro X</div></div><input id="kzu-search" class="kzu-cl-input" style="width:260px" placeholder="Pesquisar pedido, SKU ou produto..." value="' + escapeHtml(searchText) + '"></div><div class="kzu-cl-list">' + listHtml + '</div></div>' +
+        '</main>' +
+        '<aside class="kzu-cl-right"><div class="kzu-cl-rightcard"><div class="kzu-cl-righthead"><b>SKUs para separar</b><small>Somente esta aba</small></div><input id="kzu-sku-filter" class="kzu-cl-input" placeholder="Filtrar por SKU, nome ou origem" value="' + escapeHtml(skuQueueSearch) + '"><div>' + queueHtml + '</div></div></aside>' +
+      '</div>';
 
     const scanner = root.querySelector("#kzu-scanner");
     if (scanner) {
@@ -1248,12 +1286,10 @@ function initUnifiedCheckoutModule() {
         const value = scanner.value;
         scanner.value = "";
         handleUnifiedScan(value);
-        setTimeout(() => document.getElementById("kzu-scanner")?.focus(), 20);
       });
       setTimeout(() => {
-        const active = document.activeElement;
-        if (!active || active === document.body || active === root || active.id === "kzu-scanner") scanner.focus();
-      }, 30);
+        if (!document.activeElement || document.activeElement === document.body || document.activeElement === root) scanner.focus();
+      }, 20);
     }
 
     root.querySelector("#kzu-cancel-session")?.addEventListener("click", () => {
@@ -1263,48 +1299,55 @@ function initUnifiedCheckoutModule() {
       lastScanType = "info";
       renderUnified();
     });
-    root.querySelector("#kzu-finish-session")?.addEventListener("click", () => {
-      finalizeUnifiedCheckout();
+    root.querySelector("#kzu-finish-session")?.addEventListener("click", finalizeUnifiedCheckout);
+
+    root.querySelector("#kzu-search")?.addEventListener("input", event => {
+      searchText = event.target.value;
+      renderUnified();
+      const next = document.getElementById("kzu-search");
+      if (next) { next.focus(); next.setSelectionRange(searchText.length, searchText.length); }
     });
-
-    const search = root.querySelector("#kzu-search");
-    if (search) {
-      search.addEventListener("input", event => {
-        searchText = event.target.value;
-        renderUnified();
-      renderSourcePage();
-        const next = document.getElementById("kzu-search");
-        if (next) {
-          next.focus();
-          next.setSelectionRange(searchText.length, searchText.length);
-        }
-      });
-      // A pesquisa não rouba o foco do leitor. O scanner é o campo operacional padrão.
-    }
-
+    root.querySelector("#kzu-sku-filter")?.addEventListener("input", event => {
+      skuQueueSearch = event.target.value;
+      renderUnified();
+      const next = document.getElementById("kzu-sku-filter");
+      if (next) { next.focus(); next.setSelectionRange(skuQueueSearch.length, skuQueueSearch.length); }
+    });
     root.querySelectorAll("[data-category]").forEach(button => {
       button.onclick = () => { categoryFilter = button.dataset.category; renderUnified(); };
+    });
+    root.querySelectorAll("[data-channel]").forEach(button => {
+      button.onclick = () => { channelFilter = button.dataset.channel; renderUnified(); };
     });
     root.querySelectorAll("[data-source]").forEach(button => {
       button.onclick = () => {
         sourceFilter = sourceFilter === button.dataset.source ? "all" : button.dataset.source;
         renderUnified();
-      renderSourcePage();
       };
+    });
+    root.querySelector("#kzu-today")?.addEventListener("click", () => {
+      onlyTodayFilter = !onlyTodayFilter;
+      renderUnified();
+    });
+    root.querySelector("#kzu-priority")?.addEventListener("click", () => {
+      priorityFirstFilter = !priorityFirstFilter;
+      renderUnified();
     });
     root.querySelector("#kzu-clear-source")?.addEventListener("click", () => {
       sourceFilter = "all";
       renderUnified();
-      renderSourcePage();
     });
     root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
       await publishSnapshot(true);
+      try { await requestSourceAction("34552", "refresh_snapshot", {}, 15000); } catch (_) {}
+      try { await requestSourceAction("33745", "refresh_snapshot", {}, 15000); } catch (_) {}
       renderUnified();
-      renderSourcePage();
     });
     root.querySelector("#kzu-open-print")?.addEventListener("click", () => {
       try { location.href = "kryzer-print://open"; } catch (_) {}
-      setTimeout(connectSocket, 1200);
+    });
+    root.querySelector("#kzu-giro-help")?.addEventListener("click", () => {
+      window.open("/pt/order/in-process?kzUnifiedSource=1", "_blank");
     });
   }
 
