@@ -176,6 +176,7 @@ function unifiedPayload() {
       updatedAt: snapshot?.updatedAt || null,
       stale: !snapshot?.updatedAt || (now - new Date(snapshot.updatedAt).getTime()) > 90000,
       orders: Array.isArray(snapshot?.orders) ? snapshot.orders : [],
+      diagnostics: snapshot?.diagnostics || null,
     };
   });
   return { type: "unified_state", generatedAt: new Date().toISOString(), sources };
@@ -245,6 +246,7 @@ function startUnifiedBridge() {
         unifiedSnapshots.set(puid, {
           updatedAt: new Date().toISOString(),
           orders: Array.isArray(message.orders) ? message.orders : [],
+          diagnostics: message.diagnostics || null,
         });
         broadcastUnifiedState();
         return;
