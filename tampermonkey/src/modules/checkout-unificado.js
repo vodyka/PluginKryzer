@@ -1,8 +1,8 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.4.1";
-  const WS_URL = "ws://127.0.0.1:21320";
+  const VERSION = "0.4.2";
+  const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
   const SOURCE_PARAM = "kzUnifiedSource";
@@ -16,6 +16,7 @@ function initUnifiedCheckoutModule() {
   let currentPuid = "";
   let currentAccount = null;
   let socket = null;
+  let wsUrlIndex = 0;
   let reconnectTimer = null;
   let syncTimer = null;
   let pingTimer = null;
@@ -433,7 +434,7 @@ function initUnifiedCheckoutModule() {
     try { socket && socket.close(); } catch (_) {}
     connectionError = "";
     try {
-      socket = new WebSocket(WS_URL);
+      socket = new WebSocket(WS_URLS[wsUrlIndex % WS_URLS.length]);
     } catch (error) {
       connectionError = error && error.message ? error.message : "Falha ao abrir conexão local.";
       renderUnified();
@@ -444,7 +445,7 @@ function initUnifiedCheckoutModule() {
 
     const openTimeout = setTimeout(() => {
       if (!socket || socket.readyState === WebSocket.OPEN) return;
-      connectionError = "Kryzer Print não respondeu em 4 segundos na porta 21320.";
+      connectionError = "Kryzer Print não respondeu em " + WS_URLS[wsUrlIndex % WS_URLS.length] + ". Tentando rota alternativa...";
       try { socket.close(); } catch (_) {}
       renderUnified();
       renderSourcePage();
@@ -514,13 +515,14 @@ function initUnifiedCheckoutModule() {
 
     socket.addEventListener("close", () => {
       clearTimeout(openTimeout);
-      if (!connectionError) connectionError = "Kryzer Print local não está conectado.";
+      wsUrlIndex = (wsUrlIndex + 1) % WS_URLS.length;
+      if (!connectionError) connectionError = "Kryzer Print local não está conectado. Próxima tentativa: " + WS_URLS[wsUrlIndex] + ".";
       renderUnified();
       renderSourcePage();
       scheduleReconnect();
     });
     socket.addEventListener("error", () => {
-      if (!connectionError) connectionError = "Não foi possível conectar em ws://127.0.0.1:21320.";
+      if (!connectionError) connectionError = "Não foi possível conectar em " + WS_URLS[wsUrlIndex % WS_URLS.length] + ".";
       renderUnified();
       renderSourcePage();
     });
@@ -1084,7 +1086,10 @@ function initUnifiedCheckoutModule() {
       "<div class=\"kzu-diag\"><b>Pedidos brutos:</b> " + raw.length + " · <b>Enviados ao MASTER:</b> " + filtered.length +
       "<br><b>Master ID:</b> " + escapeHtml(masterWarehouseId || "não identificado") +
       "</div>" + warehouseHtml + "</span><span class=\"count\">" + filtered.length + "</span></div>" +
-      "<div class=\"kzu-toolbar\"><button id=\"kzu-source-refresh\" class=\"kzu-btn active\">Atualizar e reenviar agora</button></div></div>";
+      "<div class=\"kzu-toolbar\"><button id=\"kzu-source-refresh\" class=\"kzu-btn active\">Atualizar e reenviar agora</button>" +
+      "<button id=\"kzu-source-reconnect\" class=\"kzu-btn\">Reconectar Kryzer Print</button>" +
+      (!connected ? "<span style=\"font-size:11px;color:#b42318\">" + escapeHtml(connectionError || "Ponte local desconectada.") + "</span>" : "") +
+      "</div></div>";
 
     root.querySelectorAll("[data-set-master]").forEach(button => {
       button.addEventListener("click", async () => {
@@ -1097,6 +1102,16 @@ function initUnifiedCheckoutModule() {
       });
     });
 
+        root.querySelector("#kzu-source-reconnect")?.addEventListener("click", () => {
+      clearTimeout(reconnectTimer);
+      connectionError = "";
+      try { socket?.close(); } catch (_) {}
+      socket = null;
+      wsUrlIndex = 0;
+      setTimeout(connectSocket, 100);
+      renderSourcePage();
+    });
+
         root.querySelector("#kzu-source-refresh")?.addEventListener("click", async () => {
       await loadWarehouseRegistry(true);
       await publishSnapshot(true);
@@ -1105,8 +1120,15 @@ function initUnifiedCheckoutModule() {
   }
 
 
-  function classicBaseOrders() {
-    let rows = allOrders();
+  function classicBaseOrders(sourceSnapshot) {
+    let rows = Array.isArray(sourceSnapshot)
+      ? sourceSnapshot.flatMap(source => (source.orders || []).map(order => ({
+          ...order,
+          sourcePuid: source.puid,
+          sourceName: source.name,
+          sourceRole: source.role,
+        })))
+      : allOrders();
     if (sourceFilter !== "all") rows = rows.filter(order => String(order.sourcePuid) === String(sourceFilter));
     if (channelFilter !== "all") rows = rows.filter(order => norm(order.channel).toLowerCase() === channelFilter);
     if (onlyTodayFilter) rows = rows.filter(order => order.dueToday === true);
@@ -1211,7 +1233,7 @@ function initUnifiedCheckoutModule() {
     const connected = socket && socket.readyState === WebSocket.OPEN;
     const sources = sourceSummary();
     const clientsOffline = sources.filter(source => source.role === "CLIENT").some(source => !source.connected);
-    const baseRows = classicBaseOrders();
+    const baseRows = classicBaseOrders(sources);
     const counts = classicCounts(baseRows);
     const channels = classicChannels(baseRows);
     const categoryRows = baseRows.filter(order => order.category === categoryFilter);
