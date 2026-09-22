@@ -3,6 +3,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const http = require("node:http");
 const { print, getPrinters } = require("pdf-to-printer");
 const { WebSocketServer } = require("ws");
 
@@ -12,6 +13,7 @@ const APP_VERSION = app.getVersion();
 const PROTOCOL = "kryzer-print";
 const PAPER_FORMATS = new Set(["10X15", "A4", "PRINTER_DEFAULT"]);
 const UNIFIED_PORT = 21320;
+const UNIFIED_HTTP_PORT = 21321;
 const UNIFIED_ACCOUNTS = new Map([
   ["30945", { name: "MASTER", role: "MASTER", warehouse: "*" }],
   ["34552", { name: "Moto Cintra", role: "CLIENT", warehouse: "Master" }],
@@ -23,9 +25,12 @@ let heartbeatTimer = null;
 let jobsTimer = null;
 let busy = false;
 let unifiedServer = null;
+let unifiedHttpServer = null;
 const unifiedSockets = new Map();
 const unifiedSnapshots = new Map();
 const unifiedRequests = new Map();
+const unifiedHttpActions = new Map();
+const unifiedHttpResults = new Map();
 let unifiedPrintChain = Promise.resolve();
 let state = {
   paired: false,
@@ -112,6 +117,7 @@ function publicState() {
     appVersion: APP_VERSION,
     computerName: os.hostname(),
     unifiedPort: UNIFIED_PORT,
+    unifiedHttpPort: UNIFIED_HTTP_PORT,
     unifiedConnections: [...unifiedSockets.values()].filter(Boolean).map(meta => ({
       puid: meta.puid,
       name: meta.name,
@@ -167,8 +173,10 @@ async function heartbeat() {
 function unifiedPayload() {
   const now = Date.now();
   const sources = [...UNIFIED_ACCOUNTS.entries()].map(([puid, config]) => {
-    const connected = [...unifiedSockets.values()].some(meta => meta?.puid === puid);
     const snapshot = unifiedSnapshots.get(puid) || null;
+    const websocketConnected = [...unifiedSockets.values()].some(meta => meta?.puid === puid);
+    const snapshotFresh = Boolean(snapshot?.updatedAt && (now - new Date(snapshot.updatedAt).getTime()) <= 45000);
+    const connected = websocketConnected || snapshotFresh;
     return {
       puid,
       name: config.name,
@@ -229,6 +237,228 @@ async function printUnifiedLabel(url) {
   } finally {
     if (tempFile) await fs.unlink(tempFile).catch(() => {});
   }
+}
+
+
+function writeJson(res, status, payload) {
+  const body = JSON.stringify(payload ?? {});
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+}
+
+function readJsonRequest(req, maxBytes = 5 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("Payload muito grande."));
+        try { req.destroy(); } catch {}
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch (error) {
+        reject(new Error("JSON inválido."));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function enqueueHttpAction(targetPuid, action) {
+  const key = String(targetPuid || "");
+  if (!unifiedHttpActions.has(key)) unifiedHttpActions.set(key, []);
+  unifiedHttpActions.get(key).push(action);
+}
+
+function cleanupHttpBridgeState() {
+  const now = Date.now();
+  for (const [requestId, row] of unifiedHttpResults.entries()) {
+    if (now - Number(row.at || 0) > 120000) unifiedHttpResults.delete(requestId);
+  }
+  for (const [puid, queue] of unifiedHttpActions.entries()) {
+    const fresh = (queue || []).filter(row => now - Number(row.createdAt || 0) <= 120000);
+    if (fresh.length) unifiedHttpActions.set(puid, fresh);
+    else unifiedHttpActions.delete(puid);
+  }
+}
+
+function startUnifiedHttpBridge() {
+  if (unifiedHttpServer) return;
+
+  unifiedHttpServer = http.createServer(async (req, res) => {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      });
+      res.end();
+      return;
+    }
+
+    let url;
+    try {
+      url = new URL(req.url || "/", `http://127.0.0.1:${UNIFIED_HTTP_PORT}`);
+    } catch {
+      writeJson(res, 400, { ok: false, error: "URL inválida." });
+      return;
+    }
+
+    cleanupHttpBridgeState();
+
+    try {
+      if (req.method === "GET" && url.pathname === "/health") {
+        writeJson(res, 200, {
+          ok: true,
+          appVersion: APP_VERSION,
+          websocketPort: UNIFIED_PORT,
+          httpPort: UNIFIED_HTTP_PORT,
+        });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/state") {
+        writeJson(res, 200, { ok: true, state: unifiedPayload() });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/snapshot") {
+        const body = await readJsonRequest(req);
+        const puid = String(body.puid || "").trim();
+        if (!UNIFIED_ACCOUNTS.has(puid)) {
+          writeJson(res, 403, { ok: false, error: "PUID_NOT_ALLOWED" });
+          return;
+        }
+        unifiedSnapshots.set(puid, {
+          updatedAt: new Date().toISOString(),
+          orders: Array.isArray(body.orders) ? body.orders : [],
+          diagnostics: body.diagnostics || null,
+          transport: "http",
+        });
+        broadcastUnifiedState();
+        writeJson(res, 200, { ok: true, puid, received: Array.isArray(body.orders) ? body.orders.length : 0 });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/action-request") {
+        const body = await readJsonRequest(req);
+        const fromPuid = String(body.fromPuid || "").trim();
+        const targetPuid = String(body.targetPuid || "").trim();
+        const requestId = String(body.requestId || "").trim();
+        if (fromPuid !== "30945") {
+          writeJson(res, 403, { ok: false, error: "Somente o MASTER pode iniciar ações." });
+          return;
+        }
+        if (!requestId || !UNIFIED_ACCOUNTS.has(targetPuid)) {
+          writeJson(res, 400, { ok: false, error: "Destino/requestId inválido." });
+          return;
+        }
+        enqueueHttpAction(targetPuid, {
+          requestId,
+          fromPuid,
+          targetPuid,
+          action: String(body.action || ""),
+          payload: body.payload || {},
+          createdAt: Date.now(),
+        });
+        writeJson(res, 200, { ok: true, queued: true, requestId });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/actions") {
+        const puid = String(url.searchParams.get("puid") || "").trim();
+        if (!UNIFIED_ACCOUNTS.has(puid)) {
+          writeJson(res, 403, { ok: false, error: "PUID_NOT_ALLOWED" });
+          return;
+        }
+        const queue = unifiedHttpActions.get(puid) || [];
+        unifiedHttpActions.delete(puid);
+        writeJson(res, 200, { ok: true, actions: queue });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/action-response") {
+        const body = await readJsonRequest(req);
+        const puid = String(body.puid || "").trim();
+        const requestId = String(body.requestId || "").trim();
+        if (!UNIFIED_ACCOUNTS.has(puid) || !requestId) {
+          writeJson(res, 400, { ok: false, error: "Resposta inválida." });
+          return;
+        }
+        unifiedHttpResults.set(requestId, {
+          ok: body.ok === true,
+          result: body.result || null,
+          error: body.error || null,
+          sourcePuid: puid,
+          at: Date.now(),
+        });
+        writeJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/action-result") {
+        const requestId = String(url.searchParams.get("requestId") || "").trim();
+        const row = unifiedHttpResults.get(requestId);
+        if (!row) {
+          writeJson(res, 200, { ok: true, pending: true });
+          return;
+        }
+        unifiedHttpResults.delete(requestId);
+        writeJson(res, 200, { ok: true, pending: false, response: row });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/print") {
+        const body = await readJsonRequest(req);
+        if (String(body.fromPuid || "").trim() !== "30945") {
+          writeJson(res, 403, { ok: false, error: "Somente o MASTER pode imprimir." });
+          return;
+        }
+        const sourceUrl = String(body.url || "").trim();
+        if (!/^https?:\/\//i.test(sourceUrl)) {
+          writeJson(res, 400, { ok: false, error: "URL inválida." });
+          return;
+        }
+
+        try {
+          unifiedPrintChain = unifiedPrintChain.catch(() => {}).then(() => printUnifiedLabel(sourceUrl));
+          await unifiedPrintChain;
+          writeJson(res, 200, { ok: true });
+        } catch (error) {
+          writeJson(res, 500, { ok: false, error: error?.message || String(error) });
+        }
+        return;
+      }
+
+      writeJson(res, 404, { ok: false, error: "Endpoint não encontrado." });
+    } catch (error) {
+      writeJson(res, 500, { ok: false, error: error?.message || String(error) });
+    }
+  });
+
+  unifiedHttpServer.on("error", error => {
+    state.lastError = `Checkout Unificado HTTP: ${error?.message || error}`;
+    emitState();
+  });
+
+  unifiedHttpServer.listen(UNIFIED_HTTP_PORT, "127.0.0.1", () => {
+    state.lastError = null;
+    emitState();
+  });
 }
 
 function startUnifiedBridge() {
@@ -560,6 +790,7 @@ app.whenReady().then(async () => {
   }
   await loadConfig();
   startUnifiedBridge();
+  startUnifiedHttpBridge();
   createWindow();
   await heartbeat();
   await processJobs();
@@ -576,5 +807,6 @@ app.on("window-all-closed", () => {
   clearInterval(heartbeatTimer);
   clearInterval(jobsTimer);
   try { unifiedServer?.close(); } catch {}
+  try { unifiedHttpServer?.close(); } catch {}
   app.quit();
 });
