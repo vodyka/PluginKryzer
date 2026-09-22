@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.1.3";
+  const VERSION = "0.2.0";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -30,6 +30,9 @@ function initUnifiedCheckoutModule() {
   let searchText = "";
   let categoryFilter = "all";
   let sourceFilter = "all";
+  let checkoutSession = null;
+  let lastScanMessage = "";
+  let lastScanType = "info";
 
   const isUnifiedPage = () => new URLSearchParams(location.search).get(PARAM) === "1";
   const isSourcePage = () => new URLSearchParams(location.search).get(SOURCE_PARAM) === "1";
@@ -348,6 +351,126 @@ function initUnifiedCheckoutModule() {
     });
   }
 
+
+  function normalizeScan(value) {
+    return norm(value).toUpperCase().replace(/[\s-]+/g, "");
+  }
+
+  function orderItemsForScan(order) {
+    const items = (order && order.realItems && order.realItems.length)
+      ? order.realItems
+      : (order && order.marketplaceItems) || [];
+    return items.map(item => ({
+      sku: norm(item.sku),
+      qty: Math.max(1, Number(item.qty || 1)),
+      title: norm(item.title),
+      image: norm(item.image),
+      aliases: [...new Set([item.sku, ...(item.scanAliases || [])].map(normalizeScan).filter(Boolean))],
+    })).filter(item => item.sku);
+  }
+
+  function itemMatchesCode(item, code) {
+    const target = normalizeScan(code);
+    return item && item.aliases && item.aliases.includes(target);
+  }
+
+  function remainingForItem(session, sku) {
+    const required = Number(session.required[sku] || 0);
+    const scanned = Number(session.scanned[sku] || 0);
+    return Math.max(0, required - scanned);
+  }
+
+  function sessionComplete(session) {
+    return Object.keys(session.required || {}).every(sku => remainingForItem(session, sku) === 0);
+  }
+
+  function startUnifiedCheckout(order, initialCode) {
+    const items = orderItemsForScan(order);
+    const required = {};
+    items.forEach(item => { required[item.sku] = (required[item.sku] || 0) + item.qty; });
+    checkoutSession = {
+      sourcePuid: String(order.sourcePuid || ""),
+      sourceName: order.sourceName || "",
+      orderId: order.idStr,
+      orderNo: order.orderNo,
+      required,
+      scanned: {},
+      items,
+      startedAt: new Date().toISOString(),
+      complete: false,
+    };
+    lastScanMessage = "Pedido " + (order.orderNo || order.idStr) + " iniciado.";
+    lastScanType = "info";
+    if (initialCode) applyScanToSession(initialCode);
+  }
+
+  function applyScanToSession(code) {
+    if (!checkoutSession) return false;
+    const item = checkoutSession.items.find(row => itemMatchesCode(row, code) && remainingForItem(checkoutSession, row.sku) > 0);
+    if (!item) {
+      const known = checkoutSession.items.find(row => itemMatchesCode(row, code));
+      if (known) {
+        lastScanMessage = "SKU " + known.sku + " já foi lido na quantidade necessária.";
+      } else {
+        lastScanMessage = "Código " + norm(code) + " não pertence ao pedido " + checkoutSession.orderNo + ".";
+      }
+      lastScanType = "error";
+      return false;
+    }
+    checkoutSession.scanned[item.sku] = Number(checkoutSession.scanned[item.sku] || 0) + 1;
+    checkoutSession.complete = sessionComplete(checkoutSession);
+    if (checkoutSession.complete) {
+      lastScanMessage = "✓ Pedido " + checkoutSession.orderNo + " conferido. Pronto para imprimir.";
+      lastScanType = "success";
+    } else {
+      const missing = checkoutSession.items
+        .filter(row => remainingForItem(checkoutSession, row.sku) > 0)
+        .map(row => row.sku + " ×" + remainingForItem(checkoutSession, row.sku))
+        .join(" · ");
+      lastScanMessage = "✓ " + item.sku + " lido. Falta: " + missing;
+      lastScanType = "success";
+    }
+    return true;
+  }
+
+  function findOrderForScan(code) {
+    const target = normalizeScan(code);
+    const candidates = allOrders()
+      .filter(order => order.eligible !== false)
+      .filter(order => orderItemsForScan(order).some(item => itemMatchesCode(item, target)))
+      .sort((a,b) => {
+        const da = a.deadlineAt ? new Date(a.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        const db = b.deadlineAt ? new Date(b.deadlineAt).getTime() : Number.MAX_SAFE_INTEGER;
+        return da - db;
+      });
+    return candidates[0] || null;
+  }
+
+  function handleUnifiedScan(value) {
+    const code = normalizeScan(value);
+    if (!code) return;
+    if (checkoutSession && !checkoutSession.complete) {
+      applyScanToSession(code);
+      renderUnified();
+      return;
+    }
+    if (checkoutSession && checkoutSession.complete) {
+      lastScanMessage = "Finalize ou cancele o pedido " + checkoutSession.orderNo + " antes de iniciar outro.";
+      lastScanType = "error";
+      renderUnified();
+      return;
+    }
+    const order = findOrderForScan(code);
+    if (!order) {
+      lastScanMessage = "Nenhum pedido pendente encontrado para " + norm(value) + ".";
+      lastScanType = "error";
+      renderUnified();
+      return;
+    }
+    startUnifiedCheckout(order, code);
+    renderUnified();
+  }
+
   function sourceSummary() {
     const sourceMap = new Map();
     const knownSources = lastState && Array.isArray(lastState.sources) ? lastState.sources : [];
@@ -438,7 +561,9 @@ function initUnifiedCheckoutModule() {
       ".kzu-diag{margin-top:5px;font-size:11px;line-height:1.35;color:#475467}.kzu-diag b{font-weight:800}.kzu-diag .bad{color:#b42318}.kzu-diag .ok{color:#027a48}",
       ".kzu-source.off{opacity:.55}.kzu-source.client{border-left:4px solid #f79009}.kzu-source.master{border-left:4px solid #344054}",
       ".kzu-toolbar{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}",
-      ".kzu-search{flex:1;min-width:260px;height:42px;border:1px solid #d0d5dd;border-radius:8px;padding:0 12px;font-size:14px;outline:none}.kzu-search:focus{border-color:#667085}",
+      ".kzu-search{flex:1;min-width:220px;height:42px;border:1px solid #d0d5dd;border-radius:8px;padding:0 12px;font-size:14px;outline:none}.kzu-search:focus{border-color:#667085}",
+      ".kzu-scanner{flex:1.2;min-width:300px;height:46px;border:2px solid #101828;border-radius:9px;padding:0 14px;font-size:17px;font-weight:800;outline:none;background:#fff}.kzu-scanner:focus{box-shadow:0 0 0 3px rgba(16,24,40,.12)}",
+      ".kzu-session{background:#fff;border:2px solid #101828;border-radius:12px;padding:14px;margin-bottom:14px}.kzu-session-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.kzu-session-title{font-size:16px;font-weight:900}.kzu-session-sub{font-size:12px;color:#667085;margin-top:3px}.kzu-session-items{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.kzu-scan-item{padding:8px 10px;border:1px solid #d0d5dd;border-radius:8px;font-size:13px;font-weight:800}.kzu-scan-item.done{background:#ecfdf3;border-color:#75e0a7;color:#027a48}.kzu-scan-item.wait{background:#fffaeb;border-color:#fedf89;color:#b54708}.kzu-scan-msg{margin-top:10px;font-size:13px;font-weight:800}.kzu-scan-msg.error{color:#b42318}.kzu-scan-msg.success{color:#027a48}",
       ".kzu-btn{height:38px;border:1px solid #d0d5dd;background:#fff;border-radius:8px;padding:0 12px;font-weight:700;color:#344054;cursor:pointer}.kzu-btn.active{background:#101828;color:#fff;border-color:#101828}",
       ".kzu-table{background:#fff;border:1px solid #e4e7ec;border-radius:12px;overflow:hidden}",
       ".kzu-row{display:grid;grid-template-columns:120px 150px minmax(260px,1fr) 120px 150px 150px;gap:12px;align-items:center;padding:11px 14px;border-bottom:1px solid #eef1f4;min-height:70px}",
@@ -589,8 +714,17 @@ function initUnifiedCheckoutModule() {
       "<div class=\"kzu-page\">" +
         ((!connected || clientsOffline) ? "<div class=\"kzu-alert\"><span><b>Conexão local incompleta</b><small>" + escapeHtml(connectionError || "O MASTER funciona localmente, mas Giro X e Moto Cintra precisam do Kryzer Print 0.3.0 aberto neste computador.") + "</small></span><button id=\"kzu-open-print\">Abrir Kryzer Print</button></div>" : "") +
         "<div class=\"kzu-sources\">" + sourceCards + "</div>" +
+        (checkoutSession ? "<div class=\"kzu-session\"><div class=\"kzu-session-head\"><div><div class=\"kzu-session-title\">Separando " + escapeHtml(checkoutSession.orderNo) + " · " + escapeHtml(checkoutSession.sourceName) + "</div><div class=\"kzu-session-sub\">Leia todos os itens deste pedido antes de finalizar.</div></div><button id=\"kzu-cancel-session\" class=\"kzu-btn\">Cancelar</button></div><div class=\"kzu-session-items\">" +
+          checkoutSession.items.map(item => {
+            const done = Number(checkoutSession.scanned[item.sku] || 0);
+            const need = Number(checkoutSession.required[item.sku] || 0);
+            return "<span class=\"kzu-scan-item " + (done >= need ? "done" : "wait") + "\">" + escapeHtml(item.sku) + " · " + done + "/" + need + "</span>";
+          }).join("") +
+          "</div>" + (lastScanMessage ? "<div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\">" + escapeHtml(lastScanMessage) + "</div>" : "") +
+          (checkoutSession.complete ? "<div style=\"margin-top:12px\"><button id=\"kzu-finish-session\" class=\"kzu-btn active\">Pedido conferido · imprimir</button></div>" : "") + "</div>" : (lastScanMessage ? "<div class=\"kzu-session\" style=\"border-width:1px\"><div class=\"kzu-scan-msg " + escapeHtml(lastScanType) + "\" style=\"margin:0\">" + escapeHtml(lastScanMessage) + "</div></div>" : "")) +
         "<div class=\"kzu-toolbar\">" +
-          "<input id=\"kzu-search\" class=\"kzu-search\" autocomplete=\"off\" placeholder=\"Escanear ou pesquisar SKU, pedido, produto...\" value=\"" + escapeHtml(searchText) + "\">" +
+          "<input id=\"kzu-scanner\" class=\"kzu-scanner\" autocomplete=\"off\" placeholder=\"Bipe SKU / EAN e pressione Enter\">" +
+          "<input id=\"kzu-search\" class=\"kzu-search\" autocomplete=\"off\" placeholder=\"Pesquisar pedido, SKU ou produto...\" value=\"" + escapeHtml(searchText) + "\">" +
           categoryButtons +
           "<button id=\"kzu-refresh\" class=\"kzu-btn\">Atualizar agora</button>" +
           (sourceFilter !== "all" ? "<button id=\"kzu-clear-source\" class=\"kzu-btn active\">Fonte: " + escapeHtml(ACCOUNTS[sourceFilter] ? ACCOUNTS[sourceFilter].name : sourceFilter) + " ×</button>" : "") +
@@ -600,6 +734,36 @@ function initUnifiedCheckoutModule() {
           rows +
         "</div>" +
       "</div>";
+
+    const scanner = root.querySelector("#kzu-scanner");
+    if (scanner) {
+      scanner.addEventListener("keydown", event => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const value = scanner.value;
+        scanner.value = "";
+        handleUnifiedScan(value);
+        setTimeout(() => document.getElementById("kzu-scanner")?.focus(), 20);
+      });
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (!active || active === document.body || active === root || active.id === "kzu-scanner") scanner.focus();
+      }, 30);
+    }
+
+    root.querySelector("#kzu-cancel-session")?.addEventListener("click", () => {
+      checkoutSession = null;
+      lastScanMessage = "Separação cancelada.";
+      lastScanType = "info";
+      renderUnified();
+    });
+    root.querySelector("#kzu-finish-session")?.addEventListener("click", () => {
+      if (!checkoutSession || !checkoutSession.complete) return;
+      lastScanMessage = "Pedido " + checkoutSession.orderNo + " conferido. A impressão unificada será ligada na próxima etapa.";
+      lastScanType = "success";
+      checkoutSession = null;
+      renderUnified();
+    });
 
     const search = root.querySelector("#kzu-search");
     if (search) {
@@ -613,9 +777,7 @@ function initUnifiedCheckoutModule() {
           next.setSelectionRange(searchText.length, searchText.length);
         }
       });
-      setTimeout(() => {
-        if (document.activeElement === document.body || document.activeElement === root) search.focus();
-      }, 30);
+      // A pesquisa não rouba o foco do leitor. O scanner é o campo operacional padrão.
     }
 
     root.querySelectorAll("[data-category]").forEach(button => {
