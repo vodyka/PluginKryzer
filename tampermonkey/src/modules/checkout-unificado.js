@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.1.1";
   const WS_URL = "ws://127.0.0.1:21320";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
@@ -22,6 +22,7 @@ function initUnifiedCheckoutModule() {
   let localMasterOrders = [];
   let localMasterUpdatedAt = null;
   let connectionError = "";
+  let localMasterDiagnostics = null;
   let searchText = "";
   let categoryFilter = "all";
   let sourceFilter = "all";
@@ -55,6 +56,24 @@ function initUnifiedCheckoutModule() {
   function allowedWarehouse(order) {
     if (!currentAccount || currentAccount.role !== "CLIENT") return true;
     return fold(order && order.warehouseName) === "MASTER";
+  }
+
+  function buildDiagnostics(all, filtered) {
+    const warehouseCounts = {};
+    (all || []).forEach(order => {
+      const name = norm(order && order.warehouseName) || "Sem armazém";
+      warehouseCounts[name] = (warehouseCounts[name] || 0) + 1;
+    });
+    return {
+      rawCount: Array.isArray(all) ? all.length : 0,
+      filteredCount: Array.isArray(filtered) ? filtered.length : 0,
+      warehouseCounts,
+      currentPuid,
+      accountName: currentAccount && currentAccount.name,
+      role: currentAccount && currentAccount.role,
+      expectedWarehouse: currentAccount && currentAccount.warehouse,
+      at: new Date().toISOString(),
+    };
   }
 
   function serializeOrders(orders) {
@@ -109,10 +128,12 @@ function initUnifiedCheckoutModule() {
       }
       const all = typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
       const orders = serializeOrders(all);
+      const diagnostics = buildDiagnostics(all, orders);
 
       if (currentPuid === MASTER_PUID) {
         localMasterOrders = orders;
         localMasterUpdatedAt = new Date().toISOString();
+        localMasterDiagnostics = diagnostics;
       }
 
       if (socket && socket.readyState === WebSocket.OPEN) {
@@ -122,6 +143,7 @@ function initUnifiedCheckoutModule() {
           account: currentAccount.name,
           role: currentAccount.role,
           orders: orders,
+          diagnostics,
         }));
       }
 
@@ -226,6 +248,7 @@ function initUnifiedCheckoutModule() {
         stale: isLocalMaster ? !localMasterUpdatedAt : live.stale !== false,
         updatedAt: isLocalMaster ? localMasterUpdatedAt : (live.updatedAt || null),
         orders: isLocalMaster ? localOrders : liveOrders,
+        diagnostics: isLocalMaster ? localMasterDiagnostics : (live.diagnostics || null),
       });
     });
     return [...sourceMap.values()];
@@ -292,6 +315,7 @@ function initUnifiedCheckoutModule() {
       ".kzu-sources{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}",
       ".kzu-source{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:10px}",
       ".kzu-source strong{display:block;font-size:15px}.kzu-source small{display:block;color:#667085;margin-top:3px}.kzu-source .count{font-size:24px;font-weight:900}",
+      ".kzu-diag{margin-top:5px;font-size:11px;line-height:1.35;color:#475467}.kzu-diag b{font-weight:800}.kzu-diag .bad{color:#b42318}.kzu-diag .ok{color:#027a48}",
       ".kzu-source.off{opacity:.55}.kzu-source.client{border-left:4px solid #f79009}.kzu-source.master{border-left:4px solid #344054}",
       ".kzu-toolbar{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}",
       ".kzu-search{flex:1;min-width:260px;height:42px;border:1px solid #d0d5dd;border-radius:8px;padding:0 12px;font-size:14px;outline:none}.kzu-search:focus{border-color:#667085}",
@@ -352,8 +376,16 @@ function initUnifiedCheckoutModule() {
       const cls = source.connected ? "" : " off";
       const roleCls = source.role === "MASTER" ? " master" : " client";
       const filterNote = source.role === "CLIENT" ? "Somente armazém Master" : "Centralizador";
+      const diag = source.diagnostics || null;
+      const warehouseText = diag && diag.warehouseCounts
+        ? Object.entries(diag.warehouseCounts).map(([name,count]) => name + ": " + count).join(" · ")
+        : "";
+      const diagHtml = diag
+        ? "<div class=\"kzu-diag\"><b>Bruto:</b> " + Number(diag.rawCount || 0) + " · <b>Após filtro:</b> " + Number(diag.filteredCount || 0) +
+          (warehouseText ? "<br><span>" + escapeHtml(warehouseText) + "</span>" : "") + "</div>"
+        : (source.connected ? "<div class=\"kzu-diag\">Aguardando primeiro diagnóstico...</div>" : "<div class=\"kzu-diag bad\">Perfil/Agent não conectado ao Kryzer Print.</div>");
       return "<button class=\"kzu-source" + cls + roleCls + "\" data-source=\"" + escapeHtml(source.puid) + "\">" +
-        "<span><strong>" + escapeHtml(source.name) + "</strong><small>PUID " + escapeHtml(source.puid) + " · " + escapeHtml(status) + "</small><small>" + escapeHtml(filterNote) + "</small></span>" +
+        "<span><strong>" + escapeHtml(source.name) + "</strong><small>PUID " + escapeHtml(source.puid) + " · " + escapeHtml(status) + "</small><small>" + escapeHtml(filterNote) + "</small>" + diagHtml + "</span>" +
         "<span class=\"count\">" + source.orders.length + "</span></button>";
     }).join("");
 
