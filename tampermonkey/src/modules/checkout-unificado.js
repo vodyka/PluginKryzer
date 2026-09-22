@@ -1,8 +1,9 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.4.2";
+  const VERSION = "0.5.0";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
+  const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
   const SOURCE_PARAM = "kzUnifiedSource";
@@ -17,6 +18,10 @@ function initUnifiedCheckoutModule() {
   let currentAccount = null;
   let socket = null;
   let wsUrlIndex = 0;
+  let httpBase = "";
+  let httpBridgeOnline = false;
+  let httpPollTimer = null;
+  let httpActionTimer = null;
   let reconnectTimer = null;
   let syncTimer = null;
   let pingTimer = null;
@@ -93,6 +98,154 @@ function initUnifiedCheckoutModule() {
       };
       tick();
     });
+  }
+
+
+  function gmJson(method, url, data = null, timeout = 6000) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== "function") {
+        reject(new Error("GM_xmlhttpRequest indisponível."));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method,
+        url,
+        data: data == null ? undefined : JSON.stringify(data),
+        headers: { "Content-Type": "application/json" },
+        timeout,
+        onload: response => {
+          try {
+            const json = JSON.parse(response.responseText || "{}");
+            if (response.status < 200 || response.status >= 300) {
+              reject(new Error(json.error || ("HTTP " + response.status)));
+              return;
+            }
+            resolve(json);
+          } catch (error) {
+            reject(new Error("Resposta local inválida."));
+          }
+        },
+        onerror: () => reject(new Error("Falha na ponte HTTP local.")),
+        ontimeout: () => reject(new Error("Timeout na ponte HTTP local.")),
+      });
+    });
+  }
+
+  async function probeHttpBridge() {
+    for (const base of HTTP_URLS) {
+      try {
+        const result = await gmJson("GET", base + "/health", null, 2500);
+        if (result && result.ok) {
+          httpBase = base;
+          httpBridgeOnline = true;
+          return true;
+        }
+      } catch (_) {}
+    }
+    httpBase = "";
+    httpBridgeOnline = false;
+    return false;
+  }
+
+  function isBridgeConnected() {
+    return Boolean(socket && socket.readyState === WebSocket.OPEN) || httpBridgeOnline;
+  }
+
+  async function postSnapshotHttp(payload) {
+    if (!httpBridgeOnline && !(await probeHttpBridge())) return false;
+    try {
+      await gmJson("POST", httpBase + "/snapshot", payload, 6000);
+      httpBridgeOnline = true;
+      return true;
+    } catch (_) {
+      httpBridgeOnline = false;
+      return false;
+    }
+  }
+
+  async function pollUnifiedStateHttp() {
+    if (currentPuid !== MASTER_PUID) return;
+    if (!httpBridgeOnline && !(await probeHttpBridge())) return;
+    try {
+      const result = await gmJson("GET", httpBase + "/state", null, 5000);
+      if (result?.state) {
+        lastState = result.state;
+        httpBridgeOnline = true;
+        renderUnified();
+      }
+    } catch (_) {
+      httpBridgeOnline = false;
+    }
+  }
+
+  async function executeSourceActionCore(action, payload) {
+    if (action === "collect_label") {
+      const order = payload.order || {};
+      const url = await collectLabelUrl(order);
+      return { url };
+    }
+    if (action === "mark_print") {
+      const result = await markOrderPrintedRemote(payload.order || {});
+      setTimeout(() => publishSnapshot(true), 500);
+      return result;
+    }
+    if (action === "refresh_snapshot") {
+      await publishSnapshot(true);
+      return { ok: true };
+    }
+    throw new Error("Ação remota desconhecida: " + action);
+  }
+
+  async function pollHttpActions() {
+    if (!currentAccount) return;
+    if (!httpBridgeOnline && !(await probeHttpBridge())) return;
+    try {
+      const result = await gmJson("GET", httpBase + "/actions?puid=" + encodeURIComponent(currentPuid), null, 5000);
+      const actions = Array.isArray(result?.actions) ? result.actions : [];
+      for (const message of actions) {
+        let response;
+        try {
+          const value = await executeSourceActionCore(norm(message.action), message.payload || {});
+          response = { puid: currentPuid, requestId: norm(message.requestId), ok: true, result: value };
+        } catch (error) {
+          response = { puid: currentPuid, requestId: norm(message.requestId), ok: false, error: error?.message || String(error) };
+        }
+        try { await gmJson("POST", httpBase + "/action-response", response, 6000); } catch (_) {}
+      }
+      httpBridgeOnline = true;
+    } catch (_) {
+      httpBridgeOnline = false;
+    }
+  }
+
+  async function requestSourceActionHttp(targetPuid, action, payload, timeoutMs = 55000) {
+    if (!httpBridgeOnline && !(await probeHttpBridge())) throw new Error("Ponte HTTP local desconectada.");
+    const requestId = makeUnifiedRequestId("httpact");
+    await gmJson("POST", httpBase + "/action-request", {
+      fromPuid: MASTER_PUID,
+      targetPuid: String(targetPuid || ""),
+      requestId,
+      action,
+      payload: payload || {},
+    }, 6000);
+
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 650));
+      const result = await gmJson("GET", httpBase + "/action-result?requestId=" + encodeURIComponent(requestId), null, 5000);
+      if (result?.pending) continue;
+      const row = result?.response || {};
+      if (row.ok === true) return row.result || {};
+      throw new Error(row.error || "Falha na conta de origem.");
+    }
+    throw new Error("Tempo esgotado aguardando a conta de origem.");
+  }
+
+  async function requestLocalPrintHttp(url) {
+    if (!httpBridgeOnline && !(await probeHttpBridge())) throw new Error("Kryzer Print HTTP desconectado.");
+    const result = await gmJson("POST", httpBase + "/print", { fromPuid: MASTER_PUID, url }, 45000);
+    if (!result?.ok) throw new Error(result?.error || "Falha ao imprimir.");
+    return result;
   }
 
   function extractWarehouseRows(json) {
@@ -289,23 +442,26 @@ function initUnifiedCheckoutModule() {
         localMasterDiagnostics = diagnostics;
       }
 
+      const snapshotPayload = {
+        type: "snapshot",
+        puid: currentPuid,
+        account: currentAccount.name,
+        role: currentAccount.role,
+        orders: [
+          ...orders,
+          {
+            __kzDiagnostic: true,
+            sourcePuid: currentPuid,
+            diagnostics,
+          }
+        ],
+        diagnostics,
+      };
+
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-          type: "snapshot",
-          puid: currentPuid,
-          account: currentAccount.name,
-          role: currentAccount.role,
-          orders: [
-            ...orders,
-            {
-              __kzDiagnostic: true,
-              sourcePuid: currentPuid,
-              diagnostics,
-            }
-          ],
-          diagnostics,
-        }));
+        socket.send(JSON.stringify(snapshotPayload));
       }
+      postSnapshotHttp(snapshotPayload).catch(() => {});
 
       connectionError = "";
       console.log("[Kryzer Unified] snapshot", currentPuid, orders.length, "de", all.length);
@@ -330,9 +486,13 @@ function initUnifiedCheckoutModule() {
   }
 
   function requestSourceAction(targetPuid, action, payload, timeoutMs = 55000) {
+    if (httpBridgeOnline) return requestSourceActionHttp(targetPuid, action, payload, timeoutMs);
     return new Promise((resolve, reject) => {
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        reject(new Error("Kryzer Print/ponte local está desconectada."));
+        probeHttpBridge().then(ok => {
+          if (ok) requestSourceActionHttp(targetPuid, action, payload, timeoutMs).then(resolve,reject);
+          else reject(new Error("Kryzer Print/ponte local está desconectada."));
+        });
         return;
       }
       const requestId = makeUnifiedRequestId("act");
@@ -353,6 +513,7 @@ function initUnifiedCheckoutModule() {
   }
 
   function requestLocalPrint(url, timeoutMs = 45000) {
+    if (httpBridgeOnline) return requestLocalPrintHttp(url);
     return new Promise((resolve, reject) => {
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         reject(new Error("Kryzer Print está desconectado."));
@@ -392,21 +553,7 @@ function initUnifiedCheckoutModule() {
     if (!requestId || !socket || socket.readyState !== WebSocket.OPEN) return;
 
     try {
-      let result = null;
-
-      if (action === "collect_label") {
-        const order = payload.order || {};
-        const url = await collectLabelUrl(order);
-        result = { url };
-      } else if (action === "mark_print") {
-        result = await markOrderPrintedRemote(payload.order || {});
-        setTimeout(() => publishSnapshot(true), 500);
-      } else if (action === "refresh_snapshot") {
-        await publishSnapshot(true);
-        result = { ok: true };
-      } else {
-        throw new Error("Ação remota desconhecida: " + action);
-      }
+      const result = await executeSourceActionCore(action, payload);
 
       socket.send(JSON.stringify({
         type: "action_response",
@@ -1055,7 +1202,7 @@ function initUnifiedCheckoutModule() {
       return;
     }
 
-    const connected = socket && socket.readyState === WebSocket.OPEN;
+    const connected = isBridgeConnected();
     const bridge = window.KZCheckoutRapido || (typeof unsafeWindow !== "undefined" ? unsafeWindow.KZCheckoutRapido : null);
     const raw = bridge && typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
     const filtered = serializeOrders(raw);
@@ -1080,7 +1227,7 @@ function initUnifiedCheckoutModule() {
     root.innerHTML =
       "<div class=\"kzu-head\"><div class=\"kzu-brand\"><div class=\"kzu-logo\">K</div><div><div class=\"kzu-title\">Fonte do Checkout Unificado</div><div class=\"kzu-sub\">" +
       escapeHtml(currentAccount.name) + " · PUID " + escapeHtml(currentPuid) + "</div></div></div>" +
-      "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? "Conectado ao Kryzer Print" : "Desconectado") + "</div></div>" +
+      "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? ("Conectado ao Kryzer Print" + (httpBridgeOnline ? " · HTTP" : "")) : "Desconectado") + "</div></div>" +
       "<div class=\"kzu-page\"><div class=\"kzu-source client\" style=\"margin-bottom:14px\"><span><strong>" + escapeHtml(currentAccount.name) + "</strong>" +
       "<small>PUID " + escapeHtml(currentPuid) + "</small>" +
       "<div class=\"kzu-diag\"><b>Pedidos brutos:</b> " + raw.length + " · <b>Enviados ao MASTER:</b> " + filtered.length +
@@ -1109,6 +1256,10 @@ function initUnifiedCheckoutModule() {
       socket = null;
       wsUrlIndex = 0;
       setTimeout(connectSocket, 100);
+      probeHttpBridge().then(() => {
+        publishSnapshot(true).catch(() => {});
+        renderSourcePage();
+      });
       renderSourcePage();
     });
 
@@ -1149,10 +1300,29 @@ function initUnifiedCheckoutModule() {
     return rows;
   }
 
+
+  function effectiveCategory(order) {
+    if (["single1","singleMany","multiple"].includes(order?.category)) return order.category;
+    const items = orderItemsForScan(order);
+    const grouped = new Map();
+    items.forEach(item => {
+      const sku = norm(item.sku);
+      if (!sku) return;
+      grouped.set(sku, (grouped.get(sku) || 0) + Math.max(1, Number(item.qty || 1)));
+    });
+    const distinct = grouped.size;
+    const total = [...grouped.values()].reduce((sum,n) => sum + Number(n || 0), 0);
+    if (distinct === 1 && total === 1) return "single1";
+    if (distinct === 1 && total > 1) return "singleMany";
+    if (distinct > 1) return "multiple";
+    return "unknown";
+  }
+
   function classicCounts(rows) {
     const counts = { single1:0, singleMany:0, multiple:0, unknown:0 };
     rows.forEach(order => {
-      if (Object.prototype.hasOwnProperty.call(counts, order.category)) counts[order.category]++;
+      const category = effectiveCategory(order);
+      if (Object.prototype.hasOwnProperty.call(counts, category)) counts[category]++;
       else counts.unknown++;
     });
     return counts;
@@ -1230,14 +1400,14 @@ function initUnifiedCheckoutModule() {
       return;
     }
 
-    const connected = socket && socket.readyState === WebSocket.OPEN;
+    const connected = isBridgeConnected();
     const sources = sourceSummary();
     const clientsOffline = sources.filter(source => source.role === "CLIENT").some(source => !source.connected);
     const baseRows = classicBaseOrders(sources);
     const counts = classicCounts(baseRows);
     const channels = classicChannels(baseRows);
-    const categoryRows = baseRows.filter(order => order.category === categoryFilter);
-    const queueRows = classicSkuQueue(categoryRows);
+    const categoryRows = baseRows.filter(order => effectiveCategory(order) === categoryFilter);
+    const queueRows = classicSkuQueue(baseRows);
 
     let root = document.getElementById("kzu-root");
     if (!root) {
@@ -1452,6 +1622,22 @@ function initUnifiedCheckoutModule() {
     }
 
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
+    probeHttpBridge().then(() => {
+      publishSnapshot(true).catch(() => {});
+      if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
+      pollHttpActions();
+    });
+    clearInterval(httpPollTimer);
+    httpPollTimer = setInterval(() => {
+      probeHttpBridge().then(() => {
+        if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
+      });
+    }, 2000);
+    clearInterval(httpActionTimer);
+    httpActionTimer = setInterval(() => {
+      pollHttpActions();
+    }, 1200);
+
     publishSnapshot(true);
     connectSocket();
 
