@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.16.1
+// @version      2.16.2
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,10 +17,10 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.16.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado.js?v=2.16.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.16.1
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.16.1
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.16.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado.js?v=2.16.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.16.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.16.2
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -36,8 +36,12 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.16.1) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.16.2) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.16.2 (2026-09-22): corrige divergência entre contador das origens e
+// lista central; o checkout passa a usar o mesmo snapshot para ambos. A ponte
+// local tenta 127.0.0.1 e localhost e a tela da fonte ganhou reconexão manual.
 //
 // v2.16.1 (2026-09-22): adiciona seleção manual do armazém Master em CLIENTs
 // quando o UpSeller devolve os armazéns sem nome. A escolha fica salva por PUID.
