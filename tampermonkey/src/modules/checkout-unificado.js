@@ -19,6 +19,9 @@ function initUnifiedCheckoutModule() {
   let pingTimer = null;
   let syncing = false;
   let lastState = null;
+  let localMasterOrders = [];
+  let localMasterUpdatedAt = null;
+  let connectionError = "";
   let searchText = "";
   let categoryFilter = "all";
   let sourceFilter = "all";
@@ -96,7 +99,7 @@ function initUnifiedCheckoutModule() {
   }
 
   async function publishSnapshot(refreshFirst) {
-    if (syncing || !socket || socket.readyState !== WebSocket.OPEN || !currentAccount) return;
+    if (syncing || !currentAccount) return;
     syncing = true;
     try {
       const bridge = await waitForCheckoutBridge(8000);
@@ -106,16 +109,29 @@ function initUnifiedCheckoutModule() {
       }
       const all = typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
       const orders = serializeOrders(all);
-      socket.send(JSON.stringify({
-        type: "snapshot",
-        puid: currentPuid,
-        account: currentAccount.name,
-        role: currentAccount.role,
-        orders: orders,
-      }));
+
+      if (currentPuid === MASTER_PUID) {
+        localMasterOrders = orders;
+        localMasterUpdatedAt = new Date().toISOString();
+      }
+
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: "snapshot",
+          puid: currentPuid,
+          account: currentAccount.name,
+          role: currentAccount.role,
+          orders: orders,
+        }));
+      }
+
+      connectionError = "";
       console.log("[Kryzer Unified] snapshot", currentPuid, orders.length, "de", all.length);
+      renderUnified();
     } catch (error) {
+      connectionError = error && error.message ? error.message : String(error);
       console.warn("[Kryzer Unified] falha ao sincronizar:", error);
+      renderUnified();
     } finally {
       syncing = false;
     }
@@ -129,14 +145,26 @@ function initUnifiedCheckoutModule() {
   function connectSocket() {
     if (!currentAccount) return;
     try { socket && socket.close(); } catch (_) {}
+    connectionError = "";
     try {
       socket = new WebSocket(WS_URL);
-    } catch (_) {
+    } catch (error) {
+      connectionError = error && error.message ? error.message : "Falha ao abrir conexão local.";
+      renderUnified();
       scheduleReconnect();
       return;
     }
 
+    const openTimeout = setTimeout(() => {
+      if (!socket || socket.readyState === WebSocket.OPEN) return;
+      connectionError = "Kryzer Print não respondeu em 4 segundos na porta 21320.";
+      try { socket.close(); } catch (_) {}
+      renderUnified();
+    }, 4000);
+
     socket.addEventListener("open", () => {
+      clearTimeout(openTimeout);
+      connectionError = "";
       socket.send(JSON.stringify({
         type: "register",
         puid: currentPuid,
@@ -161,14 +189,23 @@ function initUnifiedCheckoutModule() {
         lastState = message;
         renderUnified();
       }
-      if (message.type === "error") console.warn("[Kryzer Unified]", message.error);
+      if (message.type === "error") {
+        connectionError = "Kryzer Print recusou a conexão: " + String(message.error || "erro");
+        console.warn("[Kryzer Unified]", message.error);
+        renderUnified();
+      }
     });
 
     socket.addEventListener("close", () => {
+      clearTimeout(openTimeout);
+      if (!connectionError) connectionError = "Kryzer Print local não está conectado.";
       renderUnified();
       scheduleReconnect();
     });
-    socket.addEventListener("error", () => {});
+    socket.addEventListener("error", () => {
+      if (!connectionError) connectionError = "Não foi possível conectar em ws://127.0.0.1:21320.";
+      renderUnified();
+    });
   }
 
   function sourceSummary() {
@@ -177,15 +214,18 @@ function initUnifiedCheckoutModule() {
     Object.keys(ACCOUNTS).forEach(puid => {
       const config = ACCOUNTS[puid];
       const live = knownSources.find(row => String(row.puid) === puid) || {};
+      const isLocalMaster = puid === MASTER_PUID && currentPuid === MASTER_PUID;
+      const localOrders = isLocalMaster ? localMasterOrders : [];
+      const liveOrders = Array.isArray(live.orders) ? live.orders : [];
       sourceMap.set(puid, {
         puid: puid,
         name: config.name,
         role: config.role,
         warehouse: config.warehouse,
-        connected: live.connected === true,
-        stale: live.stale !== false,
-        updatedAt: live.updatedAt || null,
-        orders: Array.isArray(live.orders) ? live.orders : [],
+        connected: isLocalMaster ? true : live.connected === true,
+        stale: isLocalMaster ? !localMasterUpdatedAt : live.stale !== false,
+        updatedAt: isLocalMaster ? localMasterUpdatedAt : (live.updatedAt || null),
+        orders: isLocalMaster ? localOrders : liveOrders,
       });
     });
     return [...sourceMap.values()];
@@ -265,6 +305,8 @@ function initUnifiedCheckoutModule() {
       ".kzu-qty{font-size:20px;font-weight:900}.kzu-deadline{font-size:12px;font-weight:800}.kzu-deadline.late{color:#d92d20}",
       ".kzu-badge{display:inline-flex;padding:4px 7px;border-radius:999px;background:#f2f4f7;font-size:11px;font-weight:800;color:#475467}",
       ".kzu-empty{padding:50px;text-align:center;color:#667085}",
+      ".kzu-alert{margin-bottom:14px;padding:12px 14px;border:1px solid #fecdca;background:#fef3f2;color:#b42318;border-radius:10px;font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:12px}",
+      ".kzu-alert b{display:block;margin-bottom:2px}.kzu-alert small{color:#7a271a}.kzu-alert button{white-space:nowrap;height:34px;border:1px solid #f04438;background:#fff;color:#b42318;border-radius:7px;padding:0 10px;font-weight:800;cursor:pointer}",
       ".kzu-blocked{position:fixed;inset:0;z-index:2147483647;background:#101828;color:#fff;display:grid;place-items:center;font-family:Arial}.kzu-blocked>div{max-width:520px;text-align:center;padding:30px}.kzu-blocked h1{font-size:24px}.kzu-blocked p{color:#d0d5dd;line-height:1.6}",
       "@media(max-width:1000px){.kzu-sources{grid-template-columns:1fr}.kzu-row{grid-template-columns:110px 130px 1fr 80px}.kzu-row>*:nth-child(5),.kzu-row>*:nth-child(6){display:none}}"
     ].join("\n");
@@ -296,6 +338,8 @@ function initUnifiedCheckoutModule() {
     const sources = sourceSummary();
     const orders = filteredOrders();
     const connected = socket && socket.readyState === WebSocket.OPEN;
+    const clientSources = sources.filter(source => source.role === "CLIENT");
+    const clientsOffline = clientSources.some(source => !source.connected);
     let root = document.getElementById("kzu-root");
     if (!root) {
       root = document.createElement("div");
@@ -346,6 +390,7 @@ function initUnifiedCheckoutModule() {
         "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? "Kryzer Print conectado" : "Kryzer Print desconectado") + "</div>" +
       "</div>" +
       "<div class=\"kzu-page\">" +
+        ((!connected || clientsOffline) ? "<div class=\"kzu-alert\"><span><b>Conexão local incompleta</b><small>" + escapeHtml(connectionError || "O MASTER funciona localmente, mas Giro X e Moto Cintra precisam do Kryzer Print 0.3.0 aberto neste computador.") + "</small></span><button id=\"kzu-open-print\">Abrir Kryzer Print</button></div>" : "") +
         "<div class=\"kzu-sources\">" + sourceCards + "</div>" +
         "<div class=\"kzu-toolbar\">" +
           "<input id=\"kzu-search\" class=\"kzu-search\" autocomplete=\"off\" placeholder=\"Escanear ou pesquisar SKU, pedido, produto...\" value=\"" + escapeHtml(searchText) + "\">" +
@@ -392,6 +437,10 @@ function initUnifiedCheckoutModule() {
       await publishSnapshot(true);
       renderUnified();
     });
+    root.querySelector("#kzu-open-print")?.addEventListener("click", () => {
+      try { location.href = "kryzer-print://open"; } catch (_) {}
+      setTimeout(connectSocket, 1200);
+    });
   }
 
   async function start() {
@@ -411,6 +460,7 @@ function initUnifiedCheckoutModule() {
     }
 
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
+    publishSnapshot(true);
     connectSocket();
 
     if (isUnifiedPage()) {
