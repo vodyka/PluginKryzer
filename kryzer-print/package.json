@@ -1,6 +1,6 @@
 {
   "name": "kryzer-print",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agente local de impressão do Kryzer Checkout",
   "main": "main.cjs",
   "author": "Kryzer Digital",
@@ -10,7 +10,8 @@
     "dist": "electron-builder --win nsis"
   },
   "dependencies": {
-    "pdf-to-printer": "^5.6.0"
+    "pdf-to-printer": "^5.6.0",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -32,14 +33,18 @@
     "protocols": [
       {
         "name": "Kryzer Print",
-        "schemes": ["kryzer-print"]
+        "schemes": [
+          "kryzer-print"
+        ]
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "Kryzer-Print-Setup.exe"
