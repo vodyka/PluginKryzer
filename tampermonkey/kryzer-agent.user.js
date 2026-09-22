@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.14.2
+// @version      2.14.3
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -17,10 +17,10 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.14.2
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado.js?v=2.14.2
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.14.2
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.14.2
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.14.3
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado.js?v=2.14.3
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.14.3
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.14.3
 // @updateURL    https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // @downloadURL  https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/kryzer-agent.user.js
 // ==/UserScript==
@@ -36,8 +36,12 @@
 // `try { initXModule(); } catch (e) { ... }` chamando a si mesmo assim que
 // carrega — não depende mais deste arquivo pra ser iniciado.
 //
-// Ao editar um módulo, suba também o número (?v=2.14.2) nas linhas @require
+// Ao editar um módulo, suba também o número (?v=2.14.3) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.14.3 (2026-09-22): adiciona coletor de etiqueta diretamente no loader.
+// Se houver ?kzCollectLabel=PEDIDO, o próprio loader localiza o pedido, gera
+// o PDF via API e mostra a URL sem executar /api/order/mark-print.
 //
 // v2.14.2 (2026-09-22): corrige o coletor de etiqueta para iniciar isolado,
 // antes do checkout unificado, do Kryzer Print e da sincronização das filas.
@@ -225,4 +229,266 @@
 // primeiro. O módulo canva_sync foi descontinuado (removido do repositório);
 // se algum dia for reativado, precisa de um backend próprio de novo.
 
+
 console.log("[Kryzer Agent] script carregado em", location.href);
+
+(async function kzDirectLabelCollector() {
+  const params = new URLSearchParams(location.search);
+  const targetOrderNo = String(params.get("kzCollectLabel") || "").trim().toUpperCase();
+  if (!targetOrderNo) return;
+  if (window.__KZ_DIRECT_LABEL_COLLECTOR__) return;
+  window.__KZ_DIRECT_LABEL_COLLECTOR__ = true;
+
+  const pageFetch = (typeof unsafeWindow !== "undefined" && unsafeWindow.fetch)
+    ? unsafeWindow.fetch.bind(unsafeWindow)
+    : fetch.bind(window);
+
+  const norm = value => String(value == null ? "" : value).trim();
+  const esc = value => String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+  const waitBody = () => new Promise(resolve => {
+    if (document.body) return resolve();
+    const timer = setInterval(() => {
+      if (!document.body) return;
+      clearInterval(timer);
+      resolve();
+    }, 25);
+  });
+
+  let state = {
+    kind: "loading",
+    title: "Iniciando coletor...",
+    message: "Preparando o teste seguro da etiqueta.",
+    puid: "",
+    order: null,
+    url: ""
+  };
+
+  function render() {
+    if (!document.body) return;
+    let root = document.getElementById("kz-direct-label");
+    if (!root) {
+      root = document.createElement("div");
+      root.id = "kz-direct-label";
+      root.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:#f5f6f8;overflow:auto;font-family:Arial,sans-serif;color:#172033";
+      document.body.appendChild(root);
+    }
+
+    const bg = state.kind === "error" ? "#fef3f2" : state.kind === "success" ? "#ecfdf3" : "#f9fafb";
+    const border = state.kind === "error" ? "#fecdca" : state.kind === "success" ? "#abefc6" : "#eaecf0";
+    const order = state.order || {};
+
+    root.innerHTML =
+      '<div style="max-width:900px;margin:45px auto;padding:0 20px">' +
+        '<div style="background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:24px;box-shadow:0 12px 30px rgba(16,24,40,.08)">' +
+          '<div style="font-size:12px;font-weight:900;color:#667085;letter-spacing:.05em">KRYZER · COLETOR DIRETO DE ETIQUETA</div>' +
+          '<h1 style="font-size:26px;margin:8px 0 4px">' + esc(targetOrderNo) + '</h1>' +
+          '<div style="color:#667085;margin-bottom:18px">Não chama mark-print · não altera o status do pedido</div>' +
+          '<div style="padding:14px;border-radius:10px;background:' + bg + ';border:1px solid ' + border + '">' +
+            '<b>' + esc(state.title) + '</b>' +
+            '<div style="margin-top:5px;color:#475467">' + esc(state.message) + '</div>' +
+          '</div>' +
+          (state.puid ? '<div style="margin-top:16px;font-size:13px;line-height:1.8"><b>PUID atual:</b> ' + esc(state.puid) +
+            (order.idStr ? '<br><b>idStr:</b> ' + esc(order.idStr) : '') +
+            (order.authIdStr ? '<br><b>authIdStr:</b> ' + esc(order.authIdStr) : '') +
+            (order.shopName ? '<br><b>Loja:</b> ' + esc(order.shopName) : '') +
+            (order.warehouseId ? '<br><b>Armazém ID:</b> ' + esc(order.warehouseId) : '') +
+            '</div>' : '') +
+          (state.url ? '<div style="margin-top:20px"><a href="' + esc(state.url) + '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;height:46px;padding:0 18px;border-radius:9px;background:#101828;color:#fff;text-decoration:none;font-weight:900">Abrir PDF da etiqueta</a>' +
+            '<div style="margin-top:10px;font-size:11px;color:#667085;word-break:break-all">' + esc(state.url) + '</div></div>' : '') +
+          (state.kind === "error" ? '<div style="margin-top:18px"><button id="kz-label-retry" style="height:40px;padding:0 14px;border:0;border-radius:8px;background:#101828;color:#fff;font-weight:800;cursor:pointer">Tentar novamente</button></div>' : '') +
+        '</div>' +
+      '</div>';
+
+    root.querySelector("#kz-label-retry")?.addEventListener("click", () => location.reload());
+  }
+
+  async function jsonFetch(url, options = {}) {
+    const response = await pageFetch(url, { credentials: "include", ...options });
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      throw new Error("O UpSeller não retornou JSON. Verifique se esta conta continua logada.");
+    }
+    const json = await response.json();
+    if (!response.ok) throw new Error((json && (json.msg || json.message)) || ("HTTP " + response.status));
+    return json;
+  }
+
+  async function postForm(url, entries) {
+    const body = new URLSearchParams();
+    for (const [key, value] of entries) body.append(key, String(value));
+    return jsonFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "x-requested-with": "XMLHttpRequest"
+      },
+      body: body.toString()
+    });
+  }
+
+  function extractList(json) {
+    const candidates = [
+      json?.data?.list,
+      json?.data?.records,
+      json?.data?.pageInfo?.list,
+      json?.data?.page?.list,
+      json?.list,
+      json?.records
+    ];
+    return candidates.find(Array.isArray) || [];
+  }
+
+  function visibleOrderNo(order) {
+    return norm(order?.orderNumber || order?.orderNo || order?.commonNo || order?.platformOrderNo).toUpperCase();
+  }
+
+  async function findOrder() {
+    const attempts = [
+      { orderState: "in_process", labelStatus: "success", printCount: "0" },
+      { orderState: "in_process", labelStatus: "success" },
+      { orderState: "in_process" },
+      {}
+    ];
+
+    for (const extra of attempts) {
+      const base = [
+        ["timeType", "0"],
+        ["searchType", "0"],
+        ["searchValue", targetOrderNo],
+        ["sortName", "1"],
+        ["sortValue", "0"],
+        ["isVoided", "0"],
+        ["pageNum", "1"],
+        ["pageSize", "300"],
+        ["warehouseType", "0"]
+      ];
+      Object.entries(extra).forEach(([k,v]) => base.push([k,v]));
+      const json = await postForm("/api/order/index", base);
+      const list = extractList(json);
+      const exact = list.find(order => visibleOrderNo(order) === targetOrderNo);
+      if (exact) return exact;
+    }
+
+    // Fallback: lista inteira de "Para Imprimir" sem busca textual.
+    const json = await postForm("/api/order/index", [
+      ["timeType", "0"],
+      ["searchType", "0"],
+      ["searchValue", ""],
+      ["sortName", "1"],
+      ["sortValue", "0"],
+      ["orderState", "in_process"],
+      ["labelStatus", "success"],
+      ["printCount", "0"],
+      ["isVoided", "0"],
+      ["pageNum", "1"],
+      ["pageSize", "300"],
+      ["warehouseType", "0"]
+    ]);
+    return extractList(json).find(order => visibleOrderNo(order) === targetOrderNo) || null;
+  }
+
+  async function collectPdf(order) {
+    const idStr = norm(order?.idStr || order?.id);
+    const authIdStr = norm(order?.authIdStr || order?.authId);
+    if (!idStr) throw new Error("O pedido foi encontrado, mas não possui idStr.");
+    if (!authIdStr) throw new Error("O pedido foi encontrado, mas não possui authIdStr.");
+
+    state.order = {
+      idStr,
+      authIdStr,
+      shopName: norm(order?.shopName),
+      warehouseId: norm(order?.warehouseIdStr || order?.warehouseId)
+    };
+    state.title = "Pedido localizado";
+    state.message = "Preparando a etiqueta no UpSeller...";
+    render();
+
+    const prep = await postForm("/api/order/get-print-label-order", [
+      ["orderIdList[0]", idStr]
+    ]);
+    if (prep?.code != null && Number(prep.code) !== 0) {
+      throw new Error(prep.msg || "Falha em get-print-label-order.");
+    }
+
+    const printJson = await postForm("/api/print-label", [
+      ["isCos", "1"],
+      ["printIdStr", idStr],
+      ["authIdStr", authIdStr],
+      ["isBatchPrint", "1"]
+    ]);
+
+    const uuid = typeof printJson?.data === "string"
+      ? printJson.data
+      : norm(printJson?.data?.uuid || printJson?.data?.id || printJson?.uuid);
+    if (!uuid) throw new Error("O /api/print-label não retornou o UUID do processo.");
+
+    for (let i = 1; i <= 35; i++) {
+      state.title = "Gerando PDF";
+      state.message = "Aguardando o UpSeller · tentativa " + i + "/35";
+      render();
+      await new Promise(resolve => setTimeout(resolve, 650));
+
+      const check = await jsonFetch("/api/check-process?uuid=" + encodeURIComponent(uuid));
+      let processMsg = check?.data?.processMsg;
+      if (typeof processMsg === "string") {
+        try { processMsg = JSON.parse(processMsg); } catch (_) {}
+      }
+
+      const code = Number(processMsg?.code);
+      if (code === 1) {
+        const pdfUrl = norm(processMsg?.msg || processMsg?.url || processMsg?.data?.url);
+        if (!pdfUrl) throw new Error("Processo terminou, mas não retornou a URL do PDF.");
+        return new URL(pdfUrl, location.origin).href;
+      }
+      if (code === -1) {
+        const failMsg = norm(processMsg?.msg || processMsg?.data?.failList?.[0]?.msg);
+        throw new Error(failMsg || "O UpSeller informou falha ao gerar a etiqueta.");
+      }
+    }
+    throw new Error("Tempo esgotado aguardando a etiqueta.");
+  }
+
+  await waitBody();
+  render();
+
+  try {
+    state.title = "Identificando a conta";
+    state.message = "Consultando o PUID atual...";
+    render();
+
+    const home = await jsonFetch("/api/home");
+    const puid = norm(home?.data?.user?.puid || home?.data?.user?.id || home?.user?.puid || home?.user?.id);
+    state.puid = puid;
+    render();
+
+    if (puid !== "34552") {
+      throw new Error("Abra este teste na Moto Cintra. PUID esperado: 34552. PUID atual: " + (puid || "não identificado") + ".");
+    }
+
+    state.title = "Localizando pedido";
+    state.message = "Buscando " + targetOrderNo + " na fila desta conta...";
+    render();
+
+    const order = await findOrder();
+    if (!order) throw new Error("Não encontrei " + targetOrderNo + " na API desta conta.");
+
+    const url = await collectPdf(order);
+    state.kind = "success";
+    state.title = "Etiqueta coletada";
+    state.message = "PDF obtido com sucesso. O pedido NÃO foi marcado como impresso.";
+    state.url = url;
+    render();
+  } catch (error) {
+    state.kind = "error";
+    state.title = "Falha ao coletar";
+    state.message = error?.message || String(error);
+    render();
+    console.error("[Kryzer Label Collector]", error);
+  }
+})();
