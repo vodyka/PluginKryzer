@@ -25,6 +25,8 @@ let busy = false;
 let unifiedServer = null;
 const unifiedSockets = new Map();
 const unifiedSnapshots = new Map();
+const unifiedRequests = new Map();
+let unifiedPrintChain = Promise.resolve();
 let state = {
   paired: false,
   connected: false,
@@ -191,6 +193,44 @@ function broadcastUnifiedState() {
   emitState();
 }
 
+
+function sendUnified(socket, payload) {
+  if (!socket || socket.readyState !== 1) return false;
+  try {
+    socket.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function socketForPuid(puid) {
+  for (const [socket, meta] of unifiedSockets.entries()) {
+    if (meta?.puid === String(puid) && socket.readyState === 1) return socket;
+  }
+  return null;
+}
+
+function failUnifiedRequest(requester, requestId, error) {
+  sendUnified(requester, {
+    type: "action_response",
+    requestId,
+    ok: false,
+    error: String(error || "Falha na ação remota."),
+  });
+}
+
+async function printUnifiedLabel(url) {
+  let tempFile = null;
+  try {
+    tempFile = await downloadToTemp(url);
+    await print(tempFile, printOptions({ job_type: "LABEL", copies: 1 }));
+    return { ok: true };
+  } finally {
+    if (tempFile) await fs.unlink(tempFile).catch(() => {});
+  }
+}
+
 function startUnifiedBridge() {
   if (unifiedServer) return;
   try {
@@ -249,6 +289,94 @@ function startUnifiedBridge() {
           diagnostics: message.diagnostics || null,
         });
         broadcastUnifiedState();
+        return;
+      }
+
+
+      if (message.type === "action_request") {
+        if (meta.puid !== "30945") {
+          failUnifiedRequest(socket, message.requestId, "Somente o MASTER pode iniciar ações.");
+          return;
+        }
+
+        const requestId = String(message.requestId || "").trim();
+        const targetPuid = String(message.targetPuid || "").trim();
+        if (!requestId || !UNIFIED_ACCOUNTS.has(targetPuid)) {
+          failUnifiedRequest(socket, requestId, "Destino/PUID inválido.");
+          return;
+        }
+
+        const targetSocket = socketForPuid(targetPuid);
+        if (!targetSocket) {
+          failUnifiedRequest(socket, requestId, `PUID ${targetPuid} está offline.`);
+          return;
+        }
+
+        const timer = setTimeout(() => {
+          const pending = unifiedRequests.get(requestId);
+          if (!pending) return;
+          unifiedRequests.delete(requestId);
+          failUnifiedRequest(pending.requester, requestId, "Tempo esgotado aguardando a conta de origem.");
+        }, 60000);
+
+        unifiedRequests.set(requestId, {
+          requester: socket,
+          targetPuid,
+          timer,
+          createdAt: Date.now(),
+        });
+
+        sendUnified(targetSocket, {
+          type: "action_request",
+          requestId,
+          fromPuid: meta.puid,
+          targetPuid,
+          action: String(message.action || ""),
+          payload: message.payload || {},
+        });
+        return;
+      }
+
+      if (message.type === "action_response") {
+        const requestId = String(message.requestId || "").trim();
+        const pending = unifiedRequests.get(requestId);
+        if (!pending || pending.targetPuid !== meta.puid) return;
+        clearTimeout(pending.timer);
+        unifiedRequests.delete(requestId);
+        sendUnified(pending.requester, {
+          type: "action_response",
+          requestId,
+          ok: message.ok === true,
+          result: message.result || null,
+          error: message.error || null,
+          sourcePuid: meta.puid,
+        });
+        return;
+      }
+
+      if (message.type === "unified_print_request") {
+        if (meta.puid !== "30945") return;
+        const requestId = String(message.requestId || "").trim();
+        const url = String(message.url || "").trim();
+        if (!requestId || !/^https?:\/\//i.test(url)) {
+          sendUnified(socket, { type: "unified_print_result", requestId, ok: false, error: "URL de impressão inválida." });
+          return;
+        }
+
+        unifiedPrintChain = unifiedPrintChain
+          .catch(() => {})
+          .then(() => printUnifiedLabel(url))
+          .then(() => {
+            sendUnified(socket, { type: "unified_print_result", requestId, ok: true });
+          })
+          .catch(error => {
+            sendUnified(socket, {
+              type: "unified_print_result",
+              requestId,
+              ok: false,
+              error: error?.message || String(error),
+            });
+          });
         return;
       }
 
