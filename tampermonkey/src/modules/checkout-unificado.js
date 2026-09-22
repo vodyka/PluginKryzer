@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
   const MASTER_PUID = "30945";
@@ -20,6 +20,8 @@ function initUnifiedCheckoutModule() {
   let wsUrlIndex = 0;
   let httpBase = "";
   let httpBridgeOnline = false;
+  let httpBridgeVersion = "";
+  let httpBridgeLastError = "";
   let httpPollTimer = null;
   let httpActionTimer = null;
   let reconnectTimer = null;
@@ -132,18 +134,25 @@ function initUnifiedCheckoutModule() {
   }
 
   async function probeHttpBridge() {
+    let lastError = "";
     for (const base of HTTP_URLS) {
       try {
         const result = await gmJson("GET", base + "/health", null, 2500);
         if (result && result.ok) {
           httpBase = base;
           httpBridgeOnline = true;
+          httpBridgeVersion = norm(result.appVersion);
+          httpBridgeLastError = "";
           return true;
         }
-      } catch (_) {}
+      } catch (error) {
+        lastError = error && error.message ? error.message : String(error);
+      }
     }
     httpBase = "";
     httpBridgeOnline = false;
+    httpBridgeVersion = "";
+    httpBridgeLastError = lastError || "Kryzer Print HTTP não respondeu.";
     return false;
   }
 
@@ -1402,6 +1411,14 @@ function initUnifiedCheckoutModule() {
 
     const connected = isBridgeConnected();
     const sources = sourceSummary();
+
+    if (sourceFilter !== "all") {
+      const selectedSource = sources.find(source => String(source.puid) === String(sourceFilter));
+      if (!selectedSource || !selectedSource.connected || !(selectedSource.orders || []).length) {
+        sourceFilter = "all";
+      }
+    }
+
     const clientsOffline = sources.filter(source => source.role === "CLIENT").some(source => !source.connected);
     const baseRows = classicBaseOrders(sources);
     const counts = classicCounts(baseRows);
@@ -1419,7 +1436,7 @@ function initUnifiedCheckoutModule() {
 
     const originHtml = sources.map(source => {
       const status = source.connected ? (source.stale ? "atrasado" : "conectado") : "offline";
-      return '<div class="kzu-cl-origin ' + (source.connected ? '' : 'off') + (sourceFilter === source.puid ? ' active' : '') + '" data-source="' + escapeHtml(source.puid) + '">' +
+      return '<div class="kzu-cl-origin ' + (source.connected ? '' : 'off') + (sourceFilter === source.puid ? ' active' : '') + '" data-source="' + escapeHtml(source.puid) + '" title="Clique para filtrar esta origem">' +
         '<div><b>' + escapeHtml(source.name) + '</b><small>PUID ' + escapeHtml(source.puid) + ' · ' + escapeHtml(status) + '</small></div>' +
         '<em>' + Number((source.orders || []).length) + '</em></div>';
     }).join("");
@@ -1507,16 +1524,20 @@ function initUnifiedCheckoutModule() {
 
     root.innerHTML =
       '<div class="kzu-cl-head"><div class="kzu-cl-brand"><div class="kzu-cl-logo">K</div><div><div class="kzu-cl-title">Checkout por produto</div><div class="kzu-cl-ver">Kryzer Checkout Unificado · v' + VERSION + '</div></div></div>' +
-      '<div class="kzu-cl-pill ' + (connected ? '' : 'off') + '"><i></i>' + (connected ? 'Kryzer Print conectado' : 'Kryzer Print desconectado') + '</div></div>' +
+      '<div class="kzu-cl-pill ' + (connected ? '' : 'off') + '"><i></i>' + (connected ? ('Kryzer Print conectado' + (httpBridgeVersion ? ' · v' + escapeHtml(httpBridgeVersion) : '')) : 'Kryzer Print desconectado') + '</div></div>' +
       '<div class="kzu-cl-body">' +
         '<aside class="kzu-cl-side">' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Configuração</div><label class="kzu-cl-label">Impressora</label><select class="kzu-cl-select" disabled><option>Kryzer Print</option></select><button id="kzu-open-print" class="kzu-cl-sidebtn">Abrir Kryzer Print</button></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Prioridade</div><div class="kzu-cl-prio"><button id="kzu-today" class="' + (onlyTodayFilter ? 'active' : '') + '">Vence hoje</button><button id="kzu-priority" class="' + (priorityFirstFilter ? 'active' : '') + '">Prazo primeiro</button></div></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Origens</div>' + originHtml + '</div>' +
-          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>Mostrar todas as origens</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>' + (sourceFilter === 'all' ? 'Todas as origens visíveis' : 'Remover filtro de origem') + '</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
         '</aside>' +
         '<main class="kzu-cl-main">' +
-          ((!connected || clientsOffline) ? '<div class="kzu-cl-msg error" style="margin:0 0 12px">Conexão incompleta: origens offline não entram na fila. O MASTER continua funcionando.</div>' : '') +
+          ((!connected || clientsOffline) ? '<div class="kzu-cl-msg error" style="margin:0 0 12px">' +
+            (!connected
+              ? ('Kryzer Print local não respondeu. ' + escapeHtml(httpBridgeLastError || 'Abra/reinicie o Kryzer Print 0.5.0.'))
+              : 'Conexão incompleta: alguma origem CLIENT está offline. O MASTER continua funcionando.') +
+            '</div>' : '') +
           '<div class="kzu-cl-top"><div class="kzu-cl-eye">LEITURA RÁPIDA</div><div class="kzu-cl-h1">Escaneie o SKU para iniciar</div><div class="kzu-cl-sub">Os pedidos das contas conectadas são separados em uma única fila e a etiqueta é gerada na conta de origem.</div>' +
           '<div class="kzu-cl-scan"><span>⌁</span><input id="kzu-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU"><b>ENTER</b></div><div class="kzu-cl-msg' + msgClass + '">' + escapeHtml(msg) + '</div>' + sessionHtml + '</div>' +
           '<div class="kzu-cl-market"><div class="kzu-cl-marketbar"><small>Marketplaces</small>' + channelHtml + '</div></div>' +
