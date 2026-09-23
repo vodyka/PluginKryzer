@@ -105,34 +105,59 @@ function initUnifiedCheckoutModule() {
   }
 
 
-  function gmJson(method, url, data = null, timeout = 6000) {
-    return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest !== "function") {
-        reject(new Error("GM_xmlhttpRequest indisponível."));
-        return;
+  async function gmJson(method, url, data = null, timeout = 6000) {
+    let gmError = null;
+
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        return await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method,
+            url,
+            data: data == null ? undefined : JSON.stringify(data),
+            headers: { "Content-Type": "application/json" },
+            timeout,
+            onload: response => {
+              try {
+                const json = JSON.parse(response.responseText || "{}");
+                if (response.status < 200 || response.status >= 300) {
+                  reject(new Error(json.error || ("HTTP " + response.status)));
+                  return;
+                }
+                resolve(json);
+              } catch (_) {
+                reject(new Error("Resposta local inválida."));
+              }
+            },
+            onerror: () => reject(new Error("Falha GM na ponte HTTP local.")),
+            ontimeout: () => reject(new Error("Timeout GM na ponte HTTP local.")),
+          });
+        });
+      } catch (error) {
+        gmError = error;
       }
-      GM_xmlhttpRequest({
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      const response = await fetch(url, {
         method,
-        url,
-        data: data == null ? undefined : JSON.stringify(data),
+        mode: "cors",
+        cache: "no-store",
         headers: { "Content-Type": "application/json" },
-        timeout,
-        onload: response => {
-          try {
-            const json = JSON.parse(response.responseText || "{}");
-            if (response.status < 200 || response.status >= 300) {
-              reject(new Error(json.error || ("HTTP " + response.status)));
-              return;
-            }
-            resolve(json);
-          } catch (error) {
-            reject(new Error("Resposta local inválida."));
-          }
-        },
-        onerror: () => reject(new Error("Falha na ponte HTTP local.")),
-        ontimeout: () => reject(new Error("Timeout na ponte HTTP local.")),
+        body: data == null || method === "GET" ? undefined : JSON.stringify(data),
+        signal: controller.signal,
       });
-    });
+      clearTimeout(timer);
+      const json = await response.json();
+      if (!response.ok) throw new Error(json?.error || ("HTTP " + response.status));
+      return json;
+    } catch (fetchError) {
+      const first = gmError && gmError.message ? gmError.message : "";
+      const second = fetchError && fetchError.message ? fetchError.message : String(fetchError);
+      throw new Error([first, second].filter(Boolean).join(" | ") || "Falha na ponte HTTP local.");
+    }
   }
 
   async function probeHttpBridge() {
