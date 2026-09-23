@@ -185,6 +185,7 @@ function unifiedPayload() {
       connected,
       updatedAt: snapshot?.updatedAt || null,
       stale: !snapshot?.updatedAt || (now - new Date(snapshot.updatedAt).getTime()) > 90000,
+      transport: snapshot?.transport || (websocketConnected ? "ws" : null),
       orders: Array.isArray(snapshot?.orders) ? snapshot.orders : [],
       diagnostics: snapshot?.diagnostics || null,
     };
@@ -248,6 +249,7 @@ function writeJson(res, status, payload) {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Private-Network": "true",
     "Cache-Control": "no-store",
   });
   res.end(body);
@@ -305,6 +307,7 @@ function startUnifiedHttpBridge() {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Private-Network": "true",
       });
       res.end();
       return;
@@ -517,6 +520,7 @@ function startUnifiedBridge() {
           updatedAt: new Date().toISOString(),
           orders: Array.isArray(message.orders) ? message.orders : [],
           diagnostics: message.diagnostics || null,
+          transport: "ws",
         });
         broadcastUnifiedState();
         return;
