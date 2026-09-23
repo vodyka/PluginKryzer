@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.5.1";
+  const VERSION = "0.5.2";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
   const MASTER_PUID = "30945";
@@ -24,6 +24,8 @@ function initUnifiedCheckoutModule() {
   let httpBridgeLastError = "";
   let httpPollTimer = null;
   let httpActionTimer = null;
+  let snapshotHeartbeatTimer = null;
+  let snapshotRefreshTimer = null;
   let reconnectTimer = null;
   let syncTimer = null;
   let pingTimer = null;
@@ -619,7 +621,7 @@ function initUnifiedCheckoutModule() {
       }));
       publishSnapshot(true);
       clearInterval(syncTimer);
-      syncTimer = setInterval(() => publishSnapshot(true), 30000);
+      syncTimer = setInterval(() => publishSnapshot(false), 10000);
       clearInterval(pingTimer);
       pingTimer = setInterval(() => {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
@@ -1091,6 +1093,7 @@ function initUnifiedCheckoutModule() {
         connected: isLocalMaster ? true : live.connected === true,
         stale: isLocalMaster ? !localMasterUpdatedAt : live.stale !== false,
         updatedAt: isLocalMaster ? localMasterUpdatedAt : (live.updatedAt || null),
+        transport: isLocalMaster ? "local" : (live.transport || null),
         orders: isLocalMaster ? localOrders : liveOrders,
         diagnostics: isLocalMaster ? localMasterDiagnostics : (live.diagnostics || sentinel?.diagnostics || null),
       });
@@ -1435,7 +1438,10 @@ function initUnifiedCheckoutModule() {
     root.className = "kzu-classic";
 
     const originHtml = sources.map(source => {
-      const status = source.connected ? (source.stale ? "atrasado" : "conectado") : "offline";
+      const ageSec = source.updatedAt ? Math.max(0, Math.floor((Date.now() - new Date(source.updatedAt).getTime()) / 1000)) : null;
+      const status = source.connected
+        ? ((source.transport ? String(source.transport).toUpperCase() + " · " : "") + (ageSec == null ? "conectado" : "há " + ageSec + "s"))
+        : "offline";
       return '<div class="kzu-cl-origin ' + (source.connected ? '' : 'off') + (sourceFilter === source.puid ? ' active' : '') + '" data-source="' + escapeHtml(source.puid) + '" title="Clique para filtrar esta origem">' +
         '<div><b>' + escapeHtml(source.name) + '</b><small>PUID ' + escapeHtml(source.puid) + ' · ' + escapeHtml(status) + '</small></div>' +
         '<em>' + Number((source.orders || []).length) + '</em></div>';
@@ -1658,6 +1664,19 @@ function initUnifiedCheckoutModule() {
     httpActionTimer = setInterval(() => {
       pollHttpActions();
     }, 1200);
+
+    // Heartbeat de snapshot independente do WebSocket:
+    // mantém a origem viva mesmo quando ws://localhost é bloqueado no perfil.
+    clearInterval(snapshotHeartbeatTimer);
+    snapshotHeartbeatTimer = setInterval(() => {
+      publishSnapshot(false).catch(() => {});
+    }, 10000);
+
+    // Atualização real da fila em cada conta, também independente do WebSocket.
+    clearInterval(snapshotRefreshTimer);
+    snapshotRefreshTimer = setInterval(() => {
+      publishSnapshot(true).catch(() => {});
+    }, 30000);
 
     publishSnapshot(true);
     connectSocket();
