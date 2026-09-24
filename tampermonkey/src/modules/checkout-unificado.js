@@ -1913,7 +1913,7 @@ function initUnifiedCheckoutModule() {
       injectStyles();
       safeRenderUnified();
       renderSourcePage();
-      setInterval(renderUnified, 10000);
+      setInterval(safeRenderUnified, 10000);
     }
   }
 
