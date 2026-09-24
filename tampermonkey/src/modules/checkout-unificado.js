@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.6.1";
+  const VERSION = "0.6.2";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
   const CLOUD_REST_BASE = "https://iqpxkxixoirdkkcgbejz.supabase.co/rest/v1/v2_checkout_unified_snapshots";
@@ -1348,6 +1348,21 @@ function initUnifiedCheckoutModule() {
     }
     const mins = Math.floor(diff / 60000);
     return "Expira em " + Math.floor(mins / 60) + "h " + (mins % 60) + "m";
+  }
+
+  function classicDeadline(order) {
+    const value = order && order.deadlineAt ? order.deadlineAt : "";
+    const text = deadlineText(value);
+
+    if (!value) return { text, cls: "" };
+
+    const time = new Date(value).getTime();
+    if (!Number.isFinite(time)) return { text, cls: "" };
+
+    return {
+      text,
+      cls: time < Date.now() ? "late" : "safe",
+    };
   }
 
   function injectStyles() {
