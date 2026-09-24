@@ -55,3 +55,7 @@ verify_jwt = false
 
 [functions.kit-delete-template]
 verify_jwt = false
+
+# Relay em nuvem do Checkout Unificado. Chamado diretamente pelo Agent.
+[functions.checkout-unified-relay]
+verify_jwt = false
