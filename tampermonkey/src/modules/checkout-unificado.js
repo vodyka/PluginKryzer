@@ -1,10 +1,11 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.6.0";
+  const VERSION = "0.6.1";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
-  const CLOUD_RELAY_URL = "https://iqpxkxixoirdkkcgbejz.supabase.co/functions/v1/checkout-unified-relay";
+  const CLOUD_REST_BASE = "https://iqpxkxixoirdkkcgbejz.supabase.co/rest/v1/v2_checkout_unified_snapshots";
+  const CLOUD_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlxcHhreGl4b2lyZGtrY2diZWp6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5Nzc2MTQsImV4cCI6MjA5OTU1MzYxNH0.qWcx0D08Bs_evoEr1WLhdg7KayOhcgM-Hyt0Th_DLkU";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
   const SOURCE_PARAM = "kzUnifiedSource";
@@ -112,32 +113,36 @@ function initUnifiedCheckoutModule() {
 
 
 
-  async function cloudJson(payload, timeout = 8000) {
+  async function cloudRest(method, url, data = null, extraHeaders = {}, timeout = 8000) {
+    const headers = {
+      "apikey": CLOUD_ANON_KEY,
+      "Authorization": "Bearer " + CLOUD_ANON_KEY,
+      "Content-Type": "application/json",
+      ...extraHeaders,
+    };
     let gmError = null;
 
     if (typeof GM_xmlhttpRequest === "function") {
       try {
         return await new Promise((resolve, reject) => {
           GM_xmlhttpRequest({
-            method: "POST",
-            url: CLOUD_RELAY_URL,
-            data: JSON.stringify(payload || {}),
-            headers: { "Content-Type": "application/json" },
+            method,
+            url,
+            data: data == null ? undefined : JSON.stringify(data),
+            headers,
             timeout,
             onload: response => {
-              try {
-                const json = JSON.parse(response.responseText || "{}");
-                if (response.status < 200 || response.status >= 300) {
-                  reject(new Error(json.message || json.error || ("HTTP " + response.status)));
-                  return;
-                }
-                resolve(json);
-              } catch (_) {
-                reject(new Error("Resposta inválida do relay."));
+              const text = response.responseText || "";
+              let json = null;
+              try { json = text ? JSON.parse(text) : null; } catch (_) {}
+              if (response.status < 200 || response.status >= 300) {
+                reject(new Error((json && (json.message || json.error || json.hint)) || ("HTTP " + response.status + " " + text.slice(0,180))));
+                return;
               }
+              resolve(json);
             },
-            onerror: () => reject(new Error("Falha ao acessar o relay Kryzer.")),
-            ontimeout: () => reject(new Error("Timeout no relay Kryzer.")),
+            onerror: () => reject(new Error("Falha ao acessar o relay Supabase.")),
+            ontimeout: () => reject(new Error("Timeout no relay Supabase.")),
           });
         });
       } catch (error) {
@@ -148,36 +153,47 @@ function initUnifiedCheckoutModule() {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
-      const response = await fetch(CLOUD_RELAY_URL, {
-        method: "POST",
+      const response = await fetch(url, {
+        method,
         mode: "cors",
         cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload || {}),
+        headers,
+        body: data == null || method === "GET" ? undefined : JSON.stringify(data),
         signal: controller.signal,
       });
       clearTimeout(timer);
-      const json = await response.json();
-      if (!response.ok) throw new Error(json?.message || json?.error || ("HTTP " + response.status));
+      const text = await response.text();
+      let json = null;
+      try { json = text ? JSON.parse(text) : null; } catch (_) {}
+      if (!response.ok) throw new Error((json && (json.message || json.error || json.hint)) || ("HTTP " + response.status + " " + text.slice(0,180)));
       return json;
     } catch (fetchError) {
       const first = gmError && gmError.message ? gmError.message : "";
       const second = fetchError && fetchError.message ? fetchError.message : String(fetchError);
-      throw new Error([first, second].filter(Boolean).join(" | ") || "Falha no relay Kryzer.");
+      throw new Error([first, second].filter(Boolean).join(" | ") || "Falha no relay Supabase.");
     }
   }
 
   async function publishSnapshotCloud(snapshotPayload) {
     try {
-      const result = await cloudJson({
-        mode: "publish",
+      const row = {
         puid: currentPuid,
+        account_name: currentAccount?.name || currentPuid,
+        role: currentAccount?.role || "CLIENT",
         orders: Array.isArray(snapshotPayload?.orders) ? snapshotPayload.orders : [],
         diagnostics: snapshotPayload?.diagnostics || null,
-      });
-      cloudRelayOnline = Boolean(result?.ok);
+        updated_at: new Date().toISOString(),
+      };
+      await cloudRest(
+        "POST",
+        CLOUD_REST_BASE + "?on_conflict=puid",
+        row,
+        { "Prefer": "resolution=merge-duplicates,return=minimal" },
+        8000
+      );
+      cloudRelayOnline = true;
       cloudRelayLastError = "";
-      return cloudRelayOnline;
+      return true;
     } catch (error) {
       cloudRelayOnline = false;
       cloudRelayLastError = error && error.message ? error.message : String(error);
@@ -188,21 +204,43 @@ function initUnifiedCheckoutModule() {
   async function pollCloudState() {
     if (currentPuid !== MASTER_PUID) return;
     try {
-      const result = await cloudJson({ mode: "state" });
-      if (Array.isArray(result?.sources)) {
-        lastState = {
-          type: "unified_state",
-          generatedAt: result.generatedAt || new Date().toISOString(),
-          sources: result.sources,
+      const rows = await cloudRest(
+        "GET",
+        CLOUD_REST_BASE + "?select=puid,account_name,role,orders,diagnostics,updated_at&puid=in.(30945,34552,33745)",
+        null,
+        {},
+        8000
+      );
+      const now = Date.now();
+      const byPuid = new Map((Array.isArray(rows) ? rows : []).map(row => [String(row.puid), row]));
+      const sources = Object.entries(ACCOUNTS).map(([puid, config]) => {
+        const row = byPuid.get(puid) || null;
+        const updatedAt = row?.updated_at || null;
+        const ageMs = updatedAt ? now - new Date(updatedAt).getTime() : Number.POSITIVE_INFINITY;
+        return {
+          puid,
+          name: config.name,
+          role: config.role,
+          connected: ageMs <= 45000,
+          stale: ageMs > 90000,
+          updatedAt,
+          transport: "cloud",
+          orders: Array.isArray(row?.orders) ? row.orders : [],
+          diagnostics: row?.diagnostics || null,
         };
-        cloudRelayOnline = true;
-        cloudRelayLastError = "";
-        renderUnified();
-      }
+      });
+      lastState = {
+        type: "unified_state",
+        generatedAt: new Date().toISOString(),
+        sources,
+      };
+      cloudRelayOnline = true;
+      cloudRelayLastError = "";
+      safeRenderUnified();
     } catch (error) {
       cloudRelayOnline = false;
       cloudRelayLastError = error && error.message ? error.message : String(error);
-      renderUnified();
+      safeRenderUnified();
     }
   }
 
@@ -343,7 +381,7 @@ function initUnifiedCheckoutModule() {
       if (result?.state) {
         lastState = result.state;
         httpBridgeOnline = true;
-        renderUnified();
+        safeRenderUnified();
       }
     } catch (_) {
       httpBridgeOnline = false;
@@ -642,12 +680,12 @@ function initUnifiedCheckoutModule() {
 
       connectionError = "";
       console.log("[Kryzer Unified] snapshot", currentPuid, orders.length, "de", all.length);
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
     } catch (error) {
       connectionError = error && error.message ? error.message : String(error);
       console.warn("[Kryzer Unified] falha ao sincronizar:", error);
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
     } finally {
       syncing = false;
@@ -761,7 +799,7 @@ function initUnifiedCheckoutModule() {
       socket = new WebSocket(WS_URLS[wsUrlIndex % WS_URLS.length]);
     } catch (error) {
       connectionError = error && error.message ? error.message : "Falha ao abrir conexão local.";
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
       scheduleReconnect();
       return;
@@ -771,7 +809,7 @@ function initUnifiedCheckoutModule() {
       if (!socket || socket.readyState === WebSocket.OPEN) return;
       connectionError = "Kryzer Print não respondeu em " + WS_URLS[wsUrlIndex % WS_URLS.length] + ". Tentando rota alternativa...";
       try { socket.close(); } catch (_) {}
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
     }, 4000);
 
@@ -792,7 +830,7 @@ function initUnifiedCheckoutModule() {
       pingTimer = setInterval(() => {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
       }, 15000);
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
     });
 
@@ -826,13 +864,13 @@ function initUnifiedCheckoutModule() {
 
       if (message.type === "unified_state" && currentPuid === MASTER_PUID) {
         lastState = message;
-        renderUnified();
+        safeRenderUnified();
       renderSourcePage();
       }
       if (message.type === "error") {
         connectionError = "Kryzer Print recusou a conexão: " + String(message.error || "erro");
         console.warn("[Kryzer Unified]", message.error);
-        renderUnified();
+        safeRenderUnified();
       renderSourcePage();
       }
     });
@@ -841,13 +879,13 @@ function initUnifiedCheckoutModule() {
       clearTimeout(openTimeout);
       wsUrlIndex = (wsUrlIndex + 1) % WS_URLS.length;
       if (!connectionError) connectionError = "Kryzer Print local não está conectado. Próxima tentativa: " + WS_URLS[wsUrlIndex] + ".";
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
       scheduleReconnect();
     });
     socket.addEventListener("error", () => {
       if (!connectionError) connectionError = "Não foi possível conectar em " + WS_URLS[wsUrlIndex % WS_URLS.length] + ".";
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
     });
   }
@@ -1162,20 +1200,20 @@ function initUnifiedCheckoutModule() {
     if (!code) return;
     if (checkoutSession && !checkoutSession.complete) {
       applyScanToSession(code);
-      renderUnified();
+      safeRenderUnified();
       return;
     }
     if (checkoutSession && checkoutSession.complete) {
       lastScanMessage = "Finalize ou cancele o pedido " + checkoutSession.orderNo + " antes de iniciar outro.";
       lastScanType = "error";
-      renderUnified();
+      safeRenderUnified();
       return;
     }
     const order = findOrderForScan(code);
     if (!order) {
       lastScanMessage = "Nenhum pedido pendente encontrado para " + norm(value) + ".";
       lastScanType = "error";
-      renderUnified();
+      safeRenderUnified();
       return;
     }
     startUnifiedCheckout(order, code);
@@ -1209,13 +1247,13 @@ function initUnifiedCheckoutModule() {
 
       session.stage = "PRINT";
       lastScanMessage = "Etiqueta recebida. Imprimindo no Kryzer Print...";
-      renderUnified();
+      safeRenderUnified();
 
       await requestLocalPrint(pdfUrl);
 
       session.stage = "MARK";
       lastScanMessage = "Etiqueta impressa. Atualizando o pedido na conta de origem...";
-      renderUnified();
+      safeRenderUnified();
 
       await requestSourceAction(session.sourcePuid, "mark_print", { order: orderPayload }, 30000);
 
@@ -1227,7 +1265,7 @@ function initUnifiedCheckoutModule() {
         await requestSourceAction(session.sourcePuid, "refresh_snapshot", {}, 15000);
       } catch (_) {}
       if (session.sourcePuid === MASTER_PUID) publishSnapshot(true).catch(() => {});
-      renderUnified();
+      safeRenderUnified();
       setTimeout(() => document.getElementById("kzu-scanner")?.focus(), 80);
     } catch (error) {
       if (checkoutSession) {
@@ -1236,7 +1274,7 @@ function initUnifiedCheckoutModule() {
       }
       lastScanMessage = "Erro em " + session.orderNo + ": " + (error && error.message ? error.message : String(error));
       lastScanType = "error";
-      renderUnified();
+      safeRenderUnified();
     }
   }
 
@@ -1560,6 +1598,32 @@ function initUnifiedCheckoutModule() {
   }
 
 
+  function renderUnifiedFatal(error) {
+    if (!isUnifiedPage() || !document.body) return;
+    try { injectStyles(); } catch (_) {}
+    let root = document.getElementById("kzu-root");
+    if (!root) {
+      root = document.createElement("div");
+      root.id = "kzu-root";
+      document.body.appendChild(root);
+    }
+    root.className = "kzu-classic";
+    root.innerHTML =
+      '<div style="max-width:900px;margin:60px auto;background:#fff;border:1px solid #f3b5b5;border-radius:12px;padding:24px;font-family:Arial,sans-serif">' +
+      '<h2 style="margin:0 0 10px;color:#b42318">Checkout Unificado encontrou um erro</h2>' +
+      '<div style="font-size:13px;color:#475467;line-height:1.6">A página não será deixada em branco. Erro: <b>' +
+      escapeHtml(error && error.message ? error.message : String(error || "desconhecido")) +
+      '</b></div><button onclick="location.reload()" style="margin-top:16px;height:38px;padding:0 14px;border:0;border-radius:7px;background:#101828;color:#fff;font-weight:700">Recarregar</button></div>';
+  }
+
+  function safeRenderUnified() {
+    try { renderUnified(); }
+    catch (error) {
+      console.error("[Kryzer Unified] erro de render:", error);
+      renderUnifiedFatal(error);
+    }
+  }
+
   function renderUnified() {
     if (!isUnifiedPage()) return;
     injectStyles();
@@ -1730,19 +1794,19 @@ function initUnifiedCheckoutModule() {
       checkoutSession = null;
       lastScanMessage = "Separação cancelada.";
       lastScanType = "info";
-      renderUnified();
+      safeRenderUnified();
     });
     root.querySelector("#kzu-finish-session")?.addEventListener("click", finalizeUnifiedCheckout);
 
     root.querySelector("#kzu-search")?.addEventListener("input", event => {
       searchText = event.target.value;
-      renderUnified();
+      safeRenderUnified();
       const next = document.getElementById("kzu-search");
       if (next) { next.focus(); next.setSelectionRange(searchText.length, searchText.length); }
     });
     root.querySelector("#kzu-sku-filter")?.addEventListener("input", event => {
       skuQueueSearch = event.target.value;
-      renderUnified();
+      safeRenderUnified();
       const next = document.getElementById("kzu-sku-filter");
       if (next) { next.focus(); next.setSelectionRange(skuQueueSearch.length, skuQueueSearch.length); }
     });
@@ -1755,20 +1819,20 @@ function initUnifiedCheckoutModule() {
     root.querySelectorAll("[data-source]").forEach(button => {
       button.onclick = () => {
         sourceFilter = sourceFilter === button.dataset.source ? "all" : button.dataset.source;
-        renderUnified();
+        safeRenderUnified();
       };
     });
     root.querySelector("#kzu-today")?.addEventListener("click", () => {
       onlyTodayFilter = !onlyTodayFilter;
-      renderUnified();
+      safeRenderUnified();
     });
     root.querySelector("#kzu-priority")?.addEventListener("click", () => {
       priorityFirstFilter = !priorityFirstFilter;
-      renderUnified();
+      safeRenderUnified();
     });
     root.querySelector("#kzu-clear-source")?.addEventListener("click", () => {
       sourceFilter = "all";
-      renderUnified();
+      safeRenderUnified();
     });
     root.querySelector("#kzu-test-bridge")?.addEventListener("click", async () => {
       await publishSnapshot(true);
@@ -1780,13 +1844,13 @@ function initUnifiedCheckoutModule() {
         lastScanMessage = "Relay da unificação não respondeu: " + (cloudRelayLastError || "erro desconhecido");
         lastScanType = "error";
       }
-      renderUnified();
+      safeRenderUnified();
     });
 
     root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
       await publishSnapshot(true);
       await pollCloudState();
-      renderUnified();
+      safeRenderUnified();
     });
     root.querySelector("#kzu-giro-help")?.addEventListener("click", () => {
       window.open("/pt/order/in-process?kzUnifiedSource=1", "_blank");
@@ -1818,6 +1882,12 @@ function initUnifiedCheckoutModule() {
 
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
 
+    // Mostra a interface imediatamente. A sincronização vem depois.
+    if (isUnifiedPage()) {
+      injectStyles();
+      safeRenderUnified();
+    }
+
     // UNIFICAÇÃO: somente relay em nuvem. Não depende de Kryzer Print.
     await publishSnapshot(true);
     if (currentPuid === MASTER_PUID) await pollCloudState();
@@ -1841,7 +1911,7 @@ function initUnifiedCheckoutModule() {
 
     if (isUnifiedPage()) {
       injectStyles();
-      renderUnified();
+      safeRenderUnified();
       renderSourcePage();
       setInterval(renderUnified, 10000);
     }
@@ -1851,10 +1921,17 @@ function initUnifiedCheckoutModule() {
     try { renderLabelCollector(); } catch (_) {}
   }
 
+  const runStart = () => {
+    Promise.resolve(start()).catch(error => {
+      console.error("[Kryzer Unified] falha ao iniciar:", error);
+      renderUnifiedFatal(error);
+    });
+  };
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start, { once: true });
+    document.addEventListener("DOMContentLoaded", runStart, { once: true });
   } else {
-    start();
+    runStart();
   }
 }
 
