@@ -1,7 +1,7 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.5.2";
+  const VERSION = "0.5.3";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
   const MASTER_PUID = "30945";
@@ -22,6 +22,8 @@ function initUnifiedCheckoutModule() {
   let httpBridgeOnline = false;
   let httpBridgeVersion = "";
   let httpBridgeLastError = "";
+  let autoLaunchAttempted = false;
+  let autoLaunchAt = 0;
   let httpPollTimer = null;
   let httpActionTimer = null;
   let snapshotHeartbeatTimer = null;
@@ -158,6 +160,37 @@ function initUnifiedCheckoutModule() {
       const second = fetchError && fetchError.message ? fetchError.message : String(fetchError);
       throw new Error([first, second].filter(Boolean).join(" | ") || "Falha na ponte HTTP local.");
     }
+  }
+
+
+  function tryOpenKryzerPrint() {
+    const now = Date.now();
+    if (autoLaunchAttempted && now - autoLaunchAt < 30000) return false;
+    autoLaunchAttempted = true;
+    autoLaunchAt = now;
+    try {
+      const a = document.createElement("a");
+      a.href = "kryzer-print://open";
+      a.style.display = "none";
+      document.documentElement.appendChild(a);
+      a.click();
+      setTimeout(() => a.remove(), 1000);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function probeHttpBridgeWithLaunch() {
+    if (await probeHttpBridge()) return true;
+    const launched = tryOpenKryzerPrint();
+    if (!launched) return false;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      if (await probeHttpBridge()) return true;
+    }
+    return false;
   }
 
   async function probeHttpBridge() {
@@ -1293,7 +1326,7 @@ function initUnifiedCheckoutModule() {
       socket = null;
       wsUrlIndex = 0;
       setTimeout(connectSocket, 100);
-      probeHttpBridge().then(() => {
+      probeHttpBridgeWithLaunch().then(() => {
         publishSnapshot(true).catch(() => {});
         renderSourcePage();
       });
@@ -1561,7 +1594,7 @@ function initUnifiedCheckoutModule() {
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Configuração</div><label class="kzu-cl-label">Impressora</label><select class="kzu-cl-select" disabled><option>Kryzer Print</option></select><button id="kzu-open-print" class="kzu-cl-sidebtn">Abrir Kryzer Print</button></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Prioridade</div><div class="kzu-cl-prio"><button id="kzu-today" class="' + (onlyTodayFilter ? 'active' : '') + '">Vence hoje</button><button id="kzu-priority" class="' + (priorityFirstFilter ? 'active' : '') + '">Prazo primeiro</button></div></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Origens</div>' + originHtml + '</div>' +
-          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>' + (sourceFilter === 'all' ? 'Todas as origens visíveis' : 'Remover filtro de origem') + '</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-test-bridge" class="kzu-cl-sidebtn">Testar Kryzer Print <b>' + (connected ? 'OK' : 'OFF') + '</b></button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>' + (sourceFilter === 'all' ? 'Todas as origens visíveis' : 'Remover filtro de origem') + '</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
         '</aside>' +
         '<main class="kzu-cl-main">' +
           ((!connected || clientsOffline) ? '<div class="kzu-cl-msg error" style="margin:0 0 12px">' +
@@ -1636,7 +1669,22 @@ function initUnifiedCheckoutModule() {
       sourceFilter = "all";
       renderUnified();
     });
-    root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
+    root.querySelector("#kzu-test-bridge")?.addEventListener("click", async () => {
+      httpBridgeLastError = "";
+      const ok = await probeHttpBridgeWithLaunch();
+      if (ok) {
+        lastScanMessage = "✓ Kryzer Print local conectado" + (httpBridgeVersion ? " · v" + httpBridgeVersion : "") + ".";
+        lastScanType = "success";
+        publishSnapshot(true).catch(() => {});
+        if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
+      } else {
+        lastScanMessage = "Kryzer Print não respondeu em 21321. Abra o aplicativo e confira se é a versão 0.5.1.";
+        lastScanType = "error";
+      }
+      renderUnified();
+    });
+
+        root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
       await publishSnapshot(true);
       try { await requestSourceAction("34552", "refresh_snapshot", {}, 15000); } catch (_) {}
       try { await requestSourceAction("33745", "refresh_snapshot", {}, 15000); } catch (_) {}
@@ -1674,14 +1722,14 @@ function initUnifiedCheckoutModule() {
     }
 
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
-    probeHttpBridge().then(() => {
+    probeHttpBridgeWithLaunch().then(() => {
       publishSnapshot(true).catch(() => {});
       if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
       pollHttpActions();
     });
     clearInterval(httpPollTimer);
     httpPollTimer = setInterval(() => {
-      probeHttpBridge().then(() => {
+      probeHttpBridgeWithLaunch().then(() => {
         if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
       });
     }, 2000);
