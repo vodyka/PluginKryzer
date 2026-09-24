@@ -1,9 +1,10 @@
 function initUnifiedCheckoutModule() {
   "use strict";
 
-  const VERSION = "0.5.3";
+  const VERSION = "0.6.0";
   const WS_URLS = ["ws://127.0.0.1:21320", "ws://localhost:21320"];
   const HTTP_URLS = ["http://127.0.0.1:21321", "http://localhost:21321"];
+  const CLOUD_RELAY_URL = "https://iqpxkxixoirdkkcgbejz.supabase.co/functions/v1/checkout-unified-relay";
   const MASTER_PUID = "30945";
   const PARAM = "kzUnifiedCheckout";
   const SOURCE_PARAM = "kzUnifiedSource";
@@ -26,6 +27,9 @@ function initUnifiedCheckoutModule() {
   let autoLaunchAt = 0;
   let httpPollTimer = null;
   let httpActionTimer = null;
+  let cloudPollTimer = null;
+  let cloudRelayOnline = false;
+  let cloudRelayLastError = "";
   let snapshotHeartbeatTimer = null;
   let snapshotRefreshTimer = null;
   let reconnectTimer = null;
@@ -106,6 +110,105 @@ function initUnifiedCheckoutModule() {
     });
   }
 
+
+
+  async function cloudJson(payload, timeout = 8000) {
+    let gmError = null;
+
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        return await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: "POST",
+            url: CLOUD_RELAY_URL,
+            data: JSON.stringify(payload || {}),
+            headers: { "Content-Type": "application/json" },
+            timeout,
+            onload: response => {
+              try {
+                const json = JSON.parse(response.responseText || "{}");
+                if (response.status < 200 || response.status >= 300) {
+                  reject(new Error(json.message || json.error || ("HTTP " + response.status)));
+                  return;
+                }
+                resolve(json);
+              } catch (_) {
+                reject(new Error("Resposta inválida do relay."));
+              }
+            },
+            onerror: () => reject(new Error("Falha ao acessar o relay Kryzer.")),
+            ontimeout: () => reject(new Error("Timeout no relay Kryzer.")),
+          });
+        });
+      } catch (error) {
+        gmError = error;
+      }
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      const response = await fetch(CLOUD_RELAY_URL, {
+        method: "POST",
+        mode: "cors",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const json = await response.json();
+      if (!response.ok) throw new Error(json?.message || json?.error || ("HTTP " + response.status));
+      return json;
+    } catch (fetchError) {
+      const first = gmError && gmError.message ? gmError.message : "";
+      const second = fetchError && fetchError.message ? fetchError.message : String(fetchError);
+      throw new Error([first, second].filter(Boolean).join(" | ") || "Falha no relay Kryzer.");
+    }
+  }
+
+  async function publishSnapshotCloud(snapshotPayload) {
+    try {
+      const result = await cloudJson({
+        mode: "publish",
+        puid: currentPuid,
+        orders: Array.isArray(snapshotPayload?.orders) ? snapshotPayload.orders : [],
+        diagnostics: snapshotPayload?.diagnostics || null,
+      });
+      cloudRelayOnline = Boolean(result?.ok);
+      cloudRelayLastError = "";
+      return cloudRelayOnline;
+    } catch (error) {
+      cloudRelayOnline = false;
+      cloudRelayLastError = error && error.message ? error.message : String(error);
+      return false;
+    }
+  }
+
+  async function pollCloudState() {
+    if (currentPuid !== MASTER_PUID) return;
+    try {
+      const result = await cloudJson({ mode: "state" });
+      if (Array.isArray(result?.sources)) {
+        lastState = {
+          type: "unified_state",
+          generatedAt: result.generatedAt || new Date().toISOString(),
+          sources: result.sources,
+        };
+        cloudRelayOnline = true;
+        cloudRelayLastError = "";
+        renderUnified();
+      }
+    } catch (error) {
+      cloudRelayOnline = false;
+      cloudRelayLastError = error && error.message ? error.message : String(error);
+      renderUnified();
+    }
+  }
+
+  function isUnifiedRelayConnected() {
+    return cloudRelayOnline;
+  }
 
   async function gmJson(method, url, data = null, timeout = 6000) {
     let gmError = null;
@@ -527,6 +630,11 @@ function initUnifiedCheckoutModule() {
         diagnostics,
       };
 
+      // O relay em nuvem é a fonte oficial da unificação.
+      publishSnapshotCloud(snapshotPayload).catch(() => {});
+
+      // Pontes locais antigas ficam como fallback, mas não são necessárias
+      // para juntar os pedidos das três contas.
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(snapshotPayload));
       }
@@ -1272,7 +1380,7 @@ function initUnifiedCheckoutModule() {
       return;
     }
 
-    const connected = isBridgeConnected();
+    const connected = isUnifiedRelayConnected();
     const bridge = window.KZCheckoutRapido || (typeof unsafeWindow !== "undefined" ? unsafeWindow.KZCheckoutRapido : null);
     const raw = bridge && typeof bridge.snapshotUnificado === "function" ? bridge.snapshotUnificado() : [];
     const filtered = serializeOrders(raw);
@@ -1297,15 +1405,15 @@ function initUnifiedCheckoutModule() {
     root.innerHTML =
       "<div class=\"kzu-head\"><div class=\"kzu-brand\"><div class=\"kzu-logo\">K</div><div><div class=\"kzu-title\">Fonte do Checkout Unificado</div><div class=\"kzu-sub\">" +
       escapeHtml(currentAccount.name) + " · PUID " + escapeHtml(currentPuid) + "</div></div></div>" +
-      "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? ("Conectado ao Kryzer Print" + (httpBridgeOnline ? " · HTTP" : "")) : "Desconectado") + "</div></div>" +
+      "<div class=\"kzu-live" + (connected ? " on" : "") + "\"><span class=\"kzu-dot\"></span>" + (connected ? "Relay Kryzer conectado" : "Desconectado") + "</div></div>" +
       "<div class=\"kzu-page\"><div class=\"kzu-source client\" style=\"margin-bottom:14px\"><span><strong>" + escapeHtml(currentAccount.name) + "</strong>" +
       "<small>PUID " + escapeHtml(currentPuid) + "</small>" +
       "<div class=\"kzu-diag\"><b>Pedidos brutos:</b> " + raw.length + " · <b>Enviados ao MASTER:</b> " + filtered.length +
       "<br><b>Master ID:</b> " + escapeHtml(masterWarehouseId || "não identificado") +
       "</div>" + warehouseHtml + "</span><span class=\"count\">" + filtered.length + "</span></div>" +
       "<div class=\"kzu-toolbar\"><button id=\"kzu-source-refresh\" class=\"kzu-btn active\">Atualizar e reenviar agora</button>" +
-      "<button id=\"kzu-source-reconnect\" class=\"kzu-btn\">Reconectar Kryzer Print</button>" +
-      (!connected ? "<span style=\"font-size:11px;color:#b42318\">" + escapeHtml(connectionError || "Ponte local desconectada.") + "</span>" : "") +
+      "<button id=\"kzu-source-reconnect\" class=\"kzu-btn\">Testar relay</button>" +
+      (!connected ? "<span style=\"font-size:11px;color:#b42318\">" + escapeHtml(cloudRelayLastError || "Relay ainda não respondeu.") + "</span>" : "") +
       "</div></div>";
 
     root.querySelectorAll("[data-set-master]").forEach(button => {
@@ -1319,17 +1427,10 @@ function initUnifiedCheckoutModule() {
       });
     });
 
-        root.querySelector("#kzu-source-reconnect")?.addEventListener("click", () => {
-      clearTimeout(reconnectTimer);
-      connectionError = "";
-      try { socket?.close(); } catch (_) {}
-      socket = null;
-      wsUrlIndex = 0;
-      setTimeout(connectSocket, 100);
-      probeHttpBridgeWithLaunch().then(() => {
-        publishSnapshot(true).catch(() => {});
-        renderSourcePage();
-      });
+    root.querySelector("#kzu-source-reconnect")?.addEventListener("click", async () => {
+      cloudRelayLastError = "";
+      await publishSnapshot(true);
+      if (currentPuid === MASTER_PUID) await pollCloudState();
       renderSourcePage();
     });
 
@@ -1470,7 +1571,7 @@ function initUnifiedCheckoutModule() {
       return;
     }
 
-    const connected = isBridgeConnected();
+    const connected = isUnifiedRelayConnected();
     const sources = sourceSummary();
 
     if (sourceFilter !== "all") {
@@ -1588,19 +1689,19 @@ function initUnifiedCheckoutModule() {
 
     root.innerHTML =
       '<div class="kzu-cl-head"><div class="kzu-cl-brand"><div class="kzu-cl-logo">K</div><div><div class="kzu-cl-title">Checkout por produto</div><div class="kzu-cl-ver">Kryzer Checkout Unificado · v' + VERSION + '</div></div></div>' +
-      '<div class="kzu-cl-pill ' + (connected ? '' : 'off') + '"><i></i>' + (connected ? ('Kryzer Print conectado' + (httpBridgeVersion ? ' · v' + escapeHtml(httpBridgeVersion) : '')) : 'Kryzer Print desconectado') + '</div></div>' +
+      '<div class="kzu-cl-pill ' + (connected ? '' : 'off') + '"><i></i>' + (connected ? 'Unificação online' : 'Unificação offline') + '</div></div>' +
       '<div class="kzu-cl-body">' +
         '<aside class="kzu-cl-side">' +
-          '<div class="kzu-cl-card"><div class="kzu-cl-st">Configuração</div><label class="kzu-cl-label">Impressora</label><select class="kzu-cl-select" disabled><option>Kryzer Print</option></select><button id="kzu-open-print" class="kzu-cl-sidebtn">Abrir Kryzer Print</button></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Unificação</div><label class="kzu-cl-label">Relay dos pedidos</label><select class="kzu-cl-select" disabled><option>' + (connected ? 'Online' : 'Offline') + '</option></select><div class="kzu-cl-sub" style="margin-top:8px">Impressão fica para a próxima etapa.</div></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Prioridade</div><div class="kzu-cl-prio"><button id="kzu-today" class="' + (onlyTodayFilter ? 'active' : '') + '">Vence hoje</button><button id="kzu-priority" class="' + (priorityFirstFilter ? 'active' : '') + '">Prazo primeiro</button></div></div>' +
           '<div class="kzu-cl-card"><div class="kzu-cl-st">Origens</div>' + originHtml + '</div>' +
-          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-test-bridge" class="kzu-cl-sidebtn">Testar Kryzer Print <b>' + (connected ? 'OK' : 'OFF') + '</b></button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>' + (sourceFilter === 'all' ? 'Todas as origens visíveis' : 'Remover filtro de origem') + '</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
+          '<div class="kzu-cl-card"><div class="kzu-cl-st">Ações</div><button id="kzu-refresh" class="kzu-cl-sidebtn primary">Atualizar pedidos</button><button id="kzu-test-bridge" class="kzu-cl-sidebtn">Testar unificação <b>' + (connected ? 'OK' : 'OFF') + '</b></button><button id="kzu-clear-source" class="kzu-cl-sidebtn" ' + (sourceFilter === 'all' ? 'disabled' : '') + '>' + (sourceFilter === 'all' ? 'Todas as origens visíveis' : 'Remover filtro de origem') + '</button><button id="kzu-giro-help" class="kzu-cl-sidebtn">Diagnóstico Giro X <b>' + (sources.find(source => source.puid === "33745")?.connected ? 'OK' : 'OFF') + '</b></button><button class="kzu-cl-sidebtn" disabled>Análise pendente <b>' + counts.unknown + '</b></button></div>' +
         '</aside>' +
         '<main class="kzu-cl-main">' +
           ((!connected || clientsOffline) ? '<div class="kzu-cl-msg error" style="margin:0 0 12px">' +
             (!connected
-              ? ('Kryzer Print local não respondeu. ' + escapeHtml(httpBridgeLastError || 'Abra/reinicie o Kryzer Print 0.5.0.'))
-              : 'Conexão incompleta: alguma origem CLIENT está offline. O MASTER continua funcionando.') +
+              ? ('Relay da unificação não respondeu. ' + escapeHtml(cloudRelayLastError || 'Tentando novamente...'))
+              : 'Unificação incompleta: alguma origem CLIENT ainda não publicou uma fila recente.') +
             '</div>' : '') +
           '<div class="kzu-cl-top"><div class="kzu-cl-eye">LEITURA RÁPIDA</div><div class="kzu-cl-h1">Escaneie o SKU para iniciar</div><div class="kzu-cl-sub">Os pedidos das contas conectadas são separados em uma única fila e a etiqueta é gerada na conta de origem.</div>' +
           '<div class="kzu-cl-scan"><span>⌁</span><input id="kzu-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU"><b>ENTER</b></div><div class="kzu-cl-msg' + msgClass + '">' + escapeHtml(msg) + '</div>' + sessionHtml + '</div>' +
@@ -1670,28 +1771,22 @@ function initUnifiedCheckoutModule() {
       renderUnified();
     });
     root.querySelector("#kzu-test-bridge")?.addEventListener("click", async () => {
-      httpBridgeLastError = "";
-      const ok = await probeHttpBridgeWithLaunch();
-      if (ok) {
-        lastScanMessage = "✓ Kryzer Print local conectado" + (httpBridgeVersion ? " · v" + httpBridgeVersion : "") + ".";
+      await publishSnapshot(true);
+      await pollCloudState();
+      if (cloudRelayOnline) {
+        lastScanMessage = "✓ Relay da unificação conectado.";
         lastScanType = "success";
-        publishSnapshot(true).catch(() => {});
-        if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
       } else {
-        lastScanMessage = "Kryzer Print não respondeu em 21321. Abra o aplicativo e confira se é a versão 0.5.1.";
+        lastScanMessage = "Relay da unificação não respondeu: " + (cloudRelayLastError || "erro desconhecido");
         lastScanType = "error";
       }
       renderUnified();
     });
 
-        root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
+    root.querySelector("#kzu-refresh")?.addEventListener("click", async () => {
       await publishSnapshot(true);
-      try { await requestSourceAction("34552", "refresh_snapshot", {}, 15000); } catch (_) {}
-      try { await requestSourceAction("33745", "refresh_snapshot", {}, 15000); } catch (_) {}
+      await pollCloudState();
       renderUnified();
-    });
-    root.querySelector("#kzu-open-print")?.addEventListener("click", () => {
-      try { location.href = "kryzer-print://open"; } catch (_) {}
     });
     root.querySelector("#kzu-giro-help")?.addEventListener("click", () => {
       window.open("/pt/order/in-process?kzUnifiedSource=1", "_blank");
@@ -1722,37 +1817,27 @@ function initUnifiedCheckoutModule() {
     }
 
     console.log("[Kryzer Unified] conta reconhecida", currentPuid, currentAccount);
-    probeHttpBridgeWithLaunch().then(() => {
-      publishSnapshot(true).catch(() => {});
-      if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
-      pollHttpActions();
-    });
-    clearInterval(httpPollTimer);
-    httpPollTimer = setInterval(() => {
-      probeHttpBridgeWithLaunch().then(() => {
-        if (currentPuid === MASTER_PUID) pollUnifiedStateHttp();
-      });
-    }, 2000);
-    clearInterval(httpActionTimer);
-    httpActionTimer = setInterval(() => {
-      pollHttpActions();
-    }, 1200);
 
-    // Heartbeat de snapshot independente do WebSocket:
-    // mantém a origem viva mesmo quando ws://localhost é bloqueado no perfil.
+    // UNIFICAÇÃO: somente relay em nuvem. Não depende de Kryzer Print.
+    await publishSnapshot(true);
+    if (currentPuid === MASTER_PUID) await pollCloudState();
+
     clearInterval(snapshotHeartbeatTimer);
     snapshotHeartbeatTimer = setInterval(() => {
       publishSnapshot(false).catch(() => {});
     }, 10000);
 
-    // Atualização real da fila em cada conta, também independente do WebSocket.
     clearInterval(snapshotRefreshTimer);
     snapshotRefreshTimer = setInterval(() => {
       publishSnapshot(true).catch(() => {});
     }, 30000);
 
-    publishSnapshot(true);
-    connectSocket();
+    clearInterval(cloudPollTimer);
+    if (currentPuid === MASTER_PUID) {
+      cloudPollTimer = setInterval(() => {
+        pollCloudState().catch(() => {});
+      }, 2000);
+    }
 
     if (isUnifiedPage()) {
       injectStyles();
