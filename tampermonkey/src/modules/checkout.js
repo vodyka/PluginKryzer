@@ -2981,7 +2981,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        addSystemLog('plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
         resolve({
           ok: false,
           timedOut: true,
@@ -3226,8 +3226,14 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
             .filter(Boolean));
           failedIds = ids.filter(id => stillUnprinted.has(id));
         } catch (error) {
+          // Se a verificação do servidor falhar, não assumimos sucesso.
+          // Mantém os IDs em pending para impedir reimpressão duplicada.
           console.warn('[KZ Checkout] não foi possível confirmar a saída da fila:', error);
-          failedIds = [];
+          appLog('warn', 'mark_print_verificacao_falhou', {
+            pedidos: ids,
+            error: error?.message || String(error),
+          });
+          failedIds = [...ids];
         }
       }
     }
@@ -3397,7 +3403,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
         const unknownSet = new Set(unknownIds);
         state.orders = state.orders.filter(order => !unknownSet.has(norm(order.idStr)));
-        addSystemLog('impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
+        appLog('warn', 'impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
         scheduleRender();
       }
 
