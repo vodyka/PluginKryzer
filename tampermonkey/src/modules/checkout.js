@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.0';
+  const VERSION = '0.5.0.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -431,9 +431,19 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       },
       body: JSON.stringify(body || {}),
     });
+
     let json = null;
-    try { json = await response.json(); }
-    catch { throw new Error(`Resposta inválida do UpSeller em ${endpoint}.`); }
+    let rawText = '';
+    try {
+      rawText = await response.text();
+      json = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      const error = new Error(`${endpoint} retornou resposta inválida (HTTP ${response.status}).`);
+      error.endpoint = endpoint;
+      error.httpStatus = response.status;
+      error.rawText = rawText.slice(0, 500);
+      throw error;
+    }
 
     const code = json?.code;
     const status = json?.status;
@@ -441,7 +451,11 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     const statusOk = status == null || status === '' || Number(status) === 0 || Number(status) === 200;
     if (!response.ok || !codeOk || !statusOk) {
       const msg = norm(json?.msg || json?.message || json?.errorMsg || json?.error) || `HTTP ${response.status}`;
-      throw new Error(msg);
+      const error = new Error(`${endpoint} · HTTP ${response.status} · ${msg}`);
+      error.endpoint = endpoint;
+      error.httpStatus = response.status;
+      error.responseJson = json;
+      throw error;
     }
     return json;
   }
@@ -483,19 +497,44 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     let pickPayload = null;
     let sortingPayload = null;
     try {
-      pickPayload = await postPickApi('/api/pick/scan-pick-list', { pickListNo });
-      try {
-        sortingPayload = await postPickApi('/api/pick/scan-sorting-list', { pickListNo });
-      } catch (sortingError) {
+      // A lista de pedidos é a fonte principal para o nosso modo PL.
+      // A leitura da própria PL serve apenas como metadado complementar.
+      const [sortingResult, pickResult] = await Promise.allSettled([
+        postPickApi('/api/pick/scan-sorting-list', { pickListNo }),
+        postPickApi('/api/pick/scan-pick-list', { pickListNo }),
+      ]);
+
+      if (sortingResult.status === 'fulfilled') {
+        sortingPayload = sortingResult.value;
+      } else {
         appLog('warn', 'pl_scan_sorting_list_falhou', {
           pickListNo,
-          error: sortingError?.message || String(sortingError),
+          error: sortingResult.reason?.message || String(sortingResult.reason),
+          endpoint: sortingResult.reason?.endpoint || '/api/pick/scan-sorting-list',
+          httpStatus: sortingResult.reason?.httpStatus || null,
         });
       }
 
+      if (pickResult.status === 'fulfilled') {
+        pickPayload = pickResult.value;
+      } else {
+        appLog('warn', 'pl_scan_pick_list_falhou', {
+          pickListNo,
+          error: pickResult.reason?.message || String(pickResult.reason),
+          endpoint: pickResult.reason?.endpoint || '/api/pick/scan-pick-list',
+          httpStatus: pickResult.reason?.httpStatus || null,
+        });
+      }
+
+      if (!sortingPayload && !pickPayload) {
+        const sortingMsg = sortingResult.status === 'rejected' ? (sortingResult.reason?.message || String(sortingResult.reason)) : '';
+        const pickMsg = pickResult.status === 'rejected' ? (pickResult.reason?.message || String(pickResult.reason)) : '';
+        throw new Error(`Nenhuma rota de PL respondeu. ${sortingMsg}${sortingMsg && pickMsg ? ' | ' : ''}${pickMsg}`);
+      }
+
       const orderKeys = [...new Set([
-        ...extractPickListOrderKeys(pickPayload),
         ...extractPickListOrderKeys(sortingPayload),
+        ...extractPickListOrderKeys(pickPayload),
       ])];
       const meta = extractPickListMeta(pickPayload, pickListNo);
       const sortingMeta = extractPickListMeta(sortingPayload, pickListNo);
