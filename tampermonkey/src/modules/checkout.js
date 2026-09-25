@@ -1613,9 +1613,24 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       return false;
     }
 
+    // IDs já persistidos em pending/unknown estão protegidos. Só convertemos
+    // para "resultado desconhecido" o que ficou realmente sem estado após F5.
+    const protectedIds = new Set([
+      ...(state.pending?.orderIds || []),
+      ...(state.unknownPrint?.orderIds || []),
+    ].map(norm).filter(Boolean));
+    const unresolvedIds = ids.filter(id => !protectedIds.has(id));
+
+    if (!unresolvedIds.length) {
+      clearPrintInflight('recuperacao_ja_protegida');
+      return false;
+    }
+
     const existing = state.unknownPrint;
-    const mergedIds = [...new Set([...(existing?.orderIds || []), ...ids].map(norm).filter(Boolean))];
-    const mergedNos = [...new Set([...(existing?.orderNos || []), ...(inflight?.orderNos || [])].map(norm).filter(Boolean))];
+    const unresolvedSet = new Set(unresolvedIds);
+    const inflightNos = (inflight?.orderNos || []).filter((_, index) => unresolvedSet.has(ids[index]));
+    const mergedIds = [...new Set([...(existing?.orderIds || []), ...unresolvedIds].map(norm).filter(Boolean))];
+    const mergedNos = [...new Set([...(existing?.orderNos || []), ...inflightNos].map(norm).filter(Boolean))];
 
     state.unknownPrint = {
       sku: existing?.sku || inflight?.label || 'Impressão interrompida',
@@ -1627,13 +1642,13 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     };
     saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
     appLog('warn', 'impressao_interrompida_recuperada', {
-      total: ids.length,
-      pedidos: inflight?.orderNos || ids,
+      total: unresolvedIds.length,
+      pedidos: inflightNos.length ? inflightNos : unresolvedIds,
       startedAt: inflight?.startedAt || '',
     });
     state.printInflight = null;
     localStorage.removeItem(STORAGE_PRINT_INFLIGHT);
-    state.message = '⚠ Uma impressão de ' + ids.length + ' etiqueta(s) foi interrompida. Confira fisicamente antes de marcar ou liberar os pedidos.';
+    state.message = '⚠ Uma impressão de ' + unresolvedIds.length + ' etiqueta(s) ficou sem confirmação. Confira fisicamente antes de marcar ou liberar os pedidos.';
     state.messageType = 'error';
     return true;
   }
