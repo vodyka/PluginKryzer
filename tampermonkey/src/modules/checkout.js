@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.4.1.0';
+  const VERSION = '0.4.2.0';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -88,7 +88,7 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     pending: readJson(STORAGE_PENDING, null),
     unknownPrint: readJson(STORAGE_UNKNOWN_PRINT, null),
     stuckVoidedOrders: readJson(STORAGE_STUCK_VOIDED, []),
-    filters: readJson(STORAGE_FILTERS, { channelSelection: {}, onlyToday: false, priorityFirst: true }),
+    filters: readJson(STORAGE_FILTERS, { channelSelection: {}, warehouses: [], onlyToday: false, priorityFirst: true }),
     systemLogs: readJson(STORAGE_LOGS, []),
     lastPrinted: readJson(STORAGE_LAST_PRINTED, null),
     printHistory: readJson(STORAGE_PRINT_HISTORY, []),
@@ -2108,6 +2108,33 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     return raw && typeof raw === 'object' ? raw : {};
   }
 
+  // Filtro GLOBAL de armazém do checkout. Diferente do filtro da coluna
+  // "SKUs para separar", este filtro afeta a fila inteira: contadores, listas,
+  // agrupamentos, leitura por SKU/EAN e abertura por número do pedido.
+  // Array vazio = todos os armazéns; um ou mais nomes = somente os selecionados.
+  function warehouseSelectionList() {
+    const raw = state.filters?.warehouses;
+    return Array.isArray(raw) ? raw.map(norm).filter(Boolean) : [];
+  }
+
+  function orderMatchesWarehouseFilter(order) {
+    const selected = warehouseSelectionList();
+    if (!selected.length) return true;
+    return new Set(selected).has(norm(order?.warehouseName));
+  }
+
+  function availableOrderWarehouses() {
+    const counts = new Map();
+    for (const order of state.orders || []) {
+      const name = norm(order?.warehouseName || 'Sem armazém');
+      if (!name) continue;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => warehouseDisplayName(a.name).localeCompare(warehouseDisplayName(b.name), 'pt-BR'));
+  }
+
   function normalizedShopName(order) {
     return norm(order?.shopName || getOrderShopName(order)).toUpperCase();
   }
@@ -2150,6 +2177,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (!Array.isArray(sel) || !sel.includes(shopName)) return false;
       }
     }
+    if (!orderMatchesWarehouseFilter(order)) return false;
     if (state.filters?.onlyToday && !order.dueToday) return false;
     return true;
   }
@@ -3317,6 +3345,12 @@ Isso NÃO chama mark-print novamente.`)) return;
     // daquele pedido específico direto, independente de ser kit, item único ou
     // múltiplas unidades, e independente da aba ativa no momento.
     const orderByNumber = findOrderByNumber(rawCode);
+    if (orderByNumber && !orderMatchesWarehouseFilter(orderByNumber)) {
+      setMessage(`Pedido ${orderByNumber.orderNo || orderByNumber.idStr} pertence ao armazém ${warehouseDisplayName(orderByNumber.warehouseName)} e está fora do filtro atual.`, 'error');
+      beep(false);
+      focusScanner();
+      return;
+    }
     if (orderByNumber) {
       if (!orderByNumber.realItems?.length) {
         setMessage(`Pedido ${orderByNumber.orderNo} encontrado, mas a composição não pôde ser analisada — separe manualmente pelo site do UpSeller.`, 'error');
@@ -3740,6 +3774,13 @@ Isso NÃO chama mark-print novamente.`)) return;
       .kzqc-marketplace-bar .kzqc-filter-btn[data-channel="all"] .kzqc-marketplace-count { position:static; border:0; box-shadow:none; background:#f0f0f0; color:#8c8c8c; }
       .kzqc-marketplace-bar .kzqc-filter-btn.active .kzqc-marketplace-count { background:#0049e5; color:#fff; border-color:#fff; }
       .kzqc-marketplace-bar .kzqc-filter-btn[data-channel="all"].active .kzqc-marketplace-count { background:#fff; color:#0049e5; }
+      .kzqc-order-warehouse-bar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin-top:8px; padding:9px 12px; background:#fff; border:1px solid #e8e8e8; border-radius:8px; }
+      .kzqc-order-warehouse-label { flex:0 0 auto; color:#595959; font-size:11px; font-weight:600; margin-right:3px; }
+      .kzqc-order-warehouse-btn { display:inline-flex; align-items:center; gap:6px; height:32px; max-width:190px; padding:0 10px; border:1px solid #d9d9d9; border-radius:6px; background:#fff; color:#595959; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .kzqc-order-warehouse-btn:hover { color:#1677ff; border-color:#1677ff; }
+      .kzqc-order-warehouse-btn.active { color:#fff; background:#1677ff; border-color:#1677ff; }
+      .kzqc-order-warehouse-btn span { display:inline-grid; place-items:center; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#f0f0f0; color:#8c8c8c; font-size:9px; }
+      .kzqc-order-warehouse-btn.active span { background:rgba(255,255,255,.2); color:#fff; }
       #kzqc-image-preview { position:fixed;z-index:2147483647;width:220px;height:220px;padding:8px;background:#fff;border:1px solid #d9d9d9;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.25);pointer-events:none;display:none; }
       #kzqc-image-preview img { width:100%;height:100%;object-fit:contain; }
       .kzqc-eyebrow { color:#0049e5; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
@@ -3913,7 +3954,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     panel.classList.toggle('minimized',state.minimized);panel.classList.toggle('kzqc-fullscreen',FULLSCREEN_MODE);
     if(FULLSCREEN_MODE){document.body.classList.add('kzqc-fullscreen-body');state.minimized=false}
     const categoryCounts=getFilteredCategoryCounts();
-    const unknownAnalysisOrders=(state.orders||[]).filter(o=>o.category==='unknown' && o.ignoredReason!=='after_sales');
+    const unknownAnalysisOrders=(state.orders||[]).filter(o=>o.category==='unknown' && o.ignoredReason!=='after_sales' && orderMatchesWarehouseFilter(o));
     const unknownAnalysisIds=[...new Set(unknownAnalysisOrders.map(o=>norm(o.orderNo||o.raw?.orderNumber||o.raw?.orderNo||o.raw?.commonNo||o.raw?.platformOrderNo||o.idStr||o.raw?.idStr||o.raw?.id)).filter(Boolean))];
     const single1Groups=groupOrdersBySku('single1'); const singleManyGroups=groupOrdersBySku('singleMany'); const multipleGroups=groupMultipleOrders();
     const printerOptions=state.printers.map(printer=>{const name=typeof printer==='string'?printer:printer.name;return `<option value="${escapeHtml(name)}" ${name===state.printer?'selected':''}>${escapeHtml(name)}</option>`}).join('');
@@ -3924,7 +3965,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     // Independe de aba/filtro/categoria — pega direto de state.orders (tudo que veio do
     // UpSeller) para garantir que um pedido atrasado nunca fique invisível por causa de
     // filtro de marketplace/loja, do toggle "Vence hoje", ou de falha de categorização.
-    const overdueOrders=(state.orders||[]).filter(o=>o.deadlineAt && new Date(o.deadlineAt).getTime()<=Date.now());
+    const overdueOrders=(state.orders||[]).filter(o=>orderMatchesWarehouseFilter(o) && o.deadlineAt && new Date(o.deadlineAt).getTime()<=Date.now());
     if(state.activeTab==='single1') listHtml=single1Orders.length?single1Orders.slice(0,160).map((o,i)=>`<div class="kzqc-row" data-kind="single1Order" data-order-id="${escapeHtml(o.idStr)}" data-sku="${escapeHtml(o.sku||o.realItems?.[0]?.sku||'')}">${o.image?`<img src="${escapeHtml(o.image)}">`:'<div style="width:48px;height:48px;background:#f5f5f5"></div>'}<div class="kzqc-row-info"><div class="kzqc-row-sku kzqc-row-order">${escapeHtml(o.orderNo||o.idStr)}</div><div class="kzqc-row-name">${enrichedTitleHtml(o)}</div><div class="kzqc-multi-summary kzqc-row-product-sku">SKU ${escapeHtml(o.sku||o.realItems?.[0]?.sku||'')}</div>${deadlineBadge(o)}</div><div class="kzqc-row-count">1</div></div>`).join(''):'<div class="kzqc-empty">Nenhum pedido Item Único (=1).</div>';
     else if(state.activeTab==='singleMany') listHtml=singleManyOrders.length?singleManyOrders.slice(0,160).map((o,i)=>`<div class="kzqc-row" data-kind="singleManyOrder" data-order-id="${escapeHtml(o.idStr)}" data-sku="${escapeHtml(o.sku||o.realItems?.[0]?.sku||'')}">${o.image?`<img src="${escapeHtml(o.image)}">`:'<div style="width:48px;height:48px;background:#f5f5f5"></div>'}<div class="kzqc-row-info"><div class="kzqc-row-sku">${escapeHtml(o.sku||o.realItems?.[0]?.sku||'')}</div><div class="kzqc-row-name">${enrichedTitleHtml(o)}</div><div class="kzqc-multi-summary">${escapeHtml(o.orderNo||o.idStr)} · ${Number(o.totalQty||0)} un</div>${deadlineBadge(o)}${orderShortageNoticeHtml(o)}</div><div class="kzqc-row-count wide">1 ped<br>${Number(o.totalQty||0)} un</div></div>`).join(''):'<div class="kzqc-empty">Nenhum pedido Item Único (&gt;1).</div>';
     else listHtml=multipleOrders.length?multipleOrders.slice(0,160).map((o,i)=>{const summary=(o.realItems||[]).map(item=>`${Number(item.qty||0)}× ${item.sku}`).join(' · ');const expanded=state.expandedMultipleId===o.idStr;return `<div class="kzqc-row ${expanded?'expanded':''}" data-kind="multipleOrder" data-order-id="${escapeHtml(o.idStr)}">${o.realItems?.[0]?.image?`<img src="${escapeHtml(o.realItems[0].image)}">`:'<div style="width:48px;height:48px;background:#f5f5f5"></div>'}<div class="kzqc-row-info"><div class="kzqc-row-sku">${escapeHtml(o.orderNo||o.idStr)}</div><div class="kzqc-multi-summary">${escapeHtml(summary)}</div>${deadlineBadge(o)}${orderShortageNoticeHtml(o)}</div><div class="kzqc-row-count wide">${(o.realItems||[]).length} SKU<br>1 ped</div>${expanded?`<div class="kzqc-multiple-components">${(o.realItems||[]).map(item=>`<button class="kzqc-component-row" data-component-sku="${escapeHtml(item.sku)}" data-order-id="${escapeHtml(o.idStr)}">${item.image?`<img src="${escapeHtml(item.image)}">`:'<span></span>'}<span><b>${escapeHtml(item.sku)}</b><small>${enrichedTitleHtml(item)}</small></span><em>${Number(item.qty||0)}×</em></button>`).join('')}</div>`:''}</div>`}).join(''):'<div class="kzqc-empty">Nenhum pedido de Múltiplos Itens.</div>';
@@ -3934,6 +3975,8 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     const sessionHtml=session?`<div class="kzqc-session"><div class="kzqc-session-head"><div><div class="kzqc-session-order">${session.ordersCount>1?`${session.ordersCount} pedidos iguais`:`Pedido ${escapeHtml(session.orderNo||session.orderId)}`}</div><div style="font-size:11px;color:#8c8c8c;margin-top:3px">${session.category==='singleMany'?'Item Único (quant. > 1)':session.category==='single1'?'Item Único (quant. = 1) — conferência por bipagem':'Múltiplos Itens'}</div></div><div class="kzqc-session-progress">${sessionProgress.scanned}/${sessionProgress.total}</div></div>${session.required.map(item=>`<div class="kzqc-session-item ${item.scanned>=item.qty?'done':item.scanned>0?'partial':''}">${item.image?`<img src="${escapeHtml(item.image)}">`:'<div style="width:36px;height:36px;background:#f5f5f5"></div>'}<div><div class="kzqc-row-sku">${escapeHtml(item.sku)}</div><div class="kzqc-row-name">${escapeHtml(item.title||'Produto')}</div></div><div class="kzqc-session-qty">${item.scanned}/${item.qty}</div></div>`).join('')}<div class="kzqc-session-actions">${canPrintScannedOnly?`<button id="kzqc-print-scanned-only" class="primary" ${session.status==='printing'?'disabled':''}>Imprimir apenas os lidos (${sessionProgress.scanned})</button>`:''}<button id="kzqc-session-abnormal" class="danger" ${session.status==='printing'?'disabled':''}>Marcar pedido como anormal</button><button id="kzqc-cancel-checkout" ${session.status==='printing'?'disabled':''}>Cancelar checkout</button></div></div>`:'';
     const skuQueue=aggregateSkuQueue();
     const warehouseOptions=[...new Set(state.orders.map(o=>o.warehouseName).filter(Boolean))].sort((a,b)=>warehouseDisplayName(a).localeCompare(warehouseDisplayName(b),'pt-BR'));
+    const orderWarehouseOptions=availableOrderWarehouses();
+    const selectedOrderWarehouses=new Set(warehouseSelectionList());
     const marketplaceChannels=availableChannels();
     const marketplaceOrderCount=marketplaceChannels.reduce((sum,channel)=>sum+channel.count,0);
     panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Múltiplos Itens</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Agrupar kits repetidos','Quando ligado, agrupa pedidos de kit idênticos e oferece imprimir tudo junto.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">Origem: Etiqueta não impressa</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.unknownPrint?.orderIds?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.unknownPrint.orderIds.length} pedido(s) com impressão sem confirmação</b><br>A etiqueta pode ter saído. Confira fisicamente antes de escolher.<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px"><button id="kzqc-unknown-mark">A etiqueta saiu — marcar</button><button id="kzqc-unknown-release" style="background:#64748b">A etiqueta não saiu — liberar</button></div></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
@@ -3964,6 +4007,14 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       panel.querySelector('.kzqc-top-card')?.insertAdjacentElement('afterend',marketplaceBar);
       channelSection.remove();
     }
+
+    const warehouseBar=document.createElement('div');
+    warehouseBar.className='kzqc-order-warehouse-bar';
+    const selectedWarehouses=selectedOrderWarehouses;
+    warehouseBar.innerHTML=`<span class="kzqc-order-warehouse-label">Filtrar pedidos por armazém</span><button class="kzqc-order-warehouse-btn ${selectedWarehouses.size===0?'active':''}" data-order-warehouse="__ALL__">Todos <span>${state.orders.length}</span></button>${orderWarehouseOptions.map(row=>`<button class="kzqc-order-warehouse-btn ${selectedWarehouses.has(row.name)?'active':''}" data-order-warehouse="${escapeHtml(row.name)}" title="${escapeHtml(row.name)}">${escapeHtml(warehouseDisplayName(row.name))} <span>${row.count}</span></button>`).join('')}`;
+    const marketplaceBarEl=panel.querySelector('.kzqc-marketplace-bar');
+    if(marketplaceBarEl) marketplaceBarEl.insertAdjacentElement('afterend',warehouseBar);
+    else panel.querySelector('.kzqc-top-card')?.insertAdjacentElement('afterend',warehouseBar);
     panel.querySelector('#kzqc-minimize')?.addEventListener('click',()=>{state.minimized=!state.minimized;saveJson(STORAGE_UI,{minimized:state.minimized,activeTab:state.activeTab});renderPanel()});
     panel.querySelector('#kzqc-close-fullscreen')?.addEventListener('click',()=>window.close()); panel.querySelector('#kzqc-open-fullscreen')?.addEventListener('click',()=>window.open('/pt/order/in-process?kzCheckout=1','_blank'));
     if(state.minimized)return;
@@ -3990,6 +4041,20 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       state.filters.channelSelection=selection;
       saveJson(STORAGE_FILTERS,state.filters);renderPanel();
     });
+    panel.querySelectorAll('.kzqc-order-warehouse-btn').forEach(button=>button.addEventListener('click',()=>{
+      const value=button.dataset.orderWarehouse;
+      if(value==='__ALL__'){
+        state.filters.warehouses=[];
+      }else{
+        const selected=new Set(warehouseSelectionList());
+        if(selected.has(value)) selected.delete(value); else selected.add(value);
+        state.filters.warehouses=[...selected];
+      }
+      state.checkoutSession=null;
+      saveJson(STORAGE_FILTERS,state.filters);
+      renderPanel();
+      setTimeout(focusScanner,30);
+    }));
     panel.querySelector('#kzqc-today-filter')?.addEventListener('click',()=>{state.filters.onlyToday=!state.filters.onlyToday;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-priority-filter')?.addEventListener('click',()=>{state.filters.priorityFirst=state.filters.priorityFirst===false;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-bulk-toggle')?.addEventListener('change',e=>{state.bulkMassPrintEnabled=e.target.checked;saveJson(STORAGE_BULK_MASS_PRINT,state.bulkMassPrintEnabled);renderPanel()});
     panel.querySelectorAll('.kzqc-tab').forEach(b=>b.onclick=()=>{if(state.checkoutSession||state.loading)return;state.activeTab=b.dataset.tab;saveJson(STORAGE_UI,{minimized:state.minimized,activeTab:state.activeTab});renderPanel();focusScanner()});
     panel.querySelectorAll('.kzqc-row').forEach(row=>{
