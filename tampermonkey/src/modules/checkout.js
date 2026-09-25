@@ -32,8 +32,10 @@ function initCheckoutModule() {
   const STORAGE_PENDING = 'kz_quick_checkout_pending_mark_v1';
   const STORAGE_UNKNOWN_PRINT = 'kz_quick_checkout_unknown_print_v1';
   const STORAGE_STUCK_VOIDED = 'kz_quick_checkout_stuck_voided_v1';
-  // Remove o marcador antigo de impressão interrompida, que causava aviso falso e devolvia pedidos já impressos à fila.
+  // v1 era um marcador antigo. v2 salva o lote completo antes do printMany e
+  // permite recuperar a sessão após F5/travamento sem reimpressão silenciosa.
   localStorage.removeItem('kz_quick_checkout_print_inflight_v1');
+  const STORAGE_PRINT_INFLIGHT = 'kz_quick_checkout_print_inflight_v2';
   const STORAGE_FILTERS = 'kz_quick_checkout_filters_v1';
   const STORAGE_LOGS = 'kz_quick_checkout_system_logs_v1';
   const MAX_SYSTEM_LOGS = 500;
@@ -89,6 +91,7 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     messageType: 'info',
     pending: readJson(STORAGE_PENDING, null),
     unknownPrint: readJson(STORAGE_UNKNOWN_PRINT, null),
+    printInflight: readJson(STORAGE_PRINT_INFLIGHT, null),
     stuckVoidedOrders: readJson(STORAGE_STUCK_VOIDED, []),
     filters: readJson(STORAGE_FILTERS, { channelSelection: {}, warehouses: [], onlyToday: false, priorityFirst: true }),
     systemLogs: readJson(STORAGE_LOGS, []),
@@ -1568,6 +1571,72 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     }
   }
 
+  function savePrintInflight(orders, label = '') {
+    const rows = (orders || []).filter(order => norm(order?.idStr));
+    if (!rows.length) return null;
+    const snapshot = {
+      label: norm(label || rows[0]?.orderNo || 'Lote de impressão'),
+      printer: state.printer || '',
+      orderIds: rows.map(order => norm(order.idStr)),
+      orderNos: rows.map(order => norm(order.orderNo || order.idStr)),
+      startedAt: new Date().toISOString(),
+      status: 'printing',
+    };
+    state.printInflight = snapshot;
+    saveJson(STORAGE_PRINT_INFLIGHT, snapshot);
+    appLog('info', 'impressao_lote_iniciado', {
+      label: snapshot.label,
+      total: snapshot.orderIds.length,
+      pedidos: snapshot.orderNos,
+    });
+    return snapshot;
+  }
+
+  function clearPrintInflight(reason = '') {
+    const snapshot = state.printInflight;
+    state.printInflight = null;
+    localStorage.removeItem(STORAGE_PRINT_INFLIGHT);
+    if (snapshot && reason) {
+      appLog('info', 'impressao_lote_inflight_encerrado', {
+        reason,
+        total: snapshot.orderIds?.length || 0,
+        pedidos: snapshot.orderNos || [],
+      });
+    }
+  }
+
+  function recoverInterruptedPrintIfNeeded() {
+    const inflight = state.printInflight;
+    const ids = [...new Set((inflight?.orderIds || []).map(norm).filter(Boolean))];
+    if (!ids.length) {
+      if (state.printInflight) clearPrintInflight('registro_vazio');
+      return false;
+    }
+
+    const existing = state.unknownPrint;
+    const mergedIds = [...new Set([...(existing?.orderIds || []), ...ids].map(norm).filter(Boolean))];
+    const mergedNos = [...new Set([...(existing?.orderNos || []), ...(inflight?.orderNos || [])].map(norm).filter(Boolean))];
+
+    state.unknownPrint = {
+      sku: existing?.sku || inflight?.label || 'Impressão interrompida',
+      printer: existing?.printer || inflight?.printer || state.printer || '',
+      orderIds: mergedIds,
+      orderNos: mergedNos,
+      createdAt: existing?.createdAt || inflight?.startedAt || new Date().toISOString(),
+      recoveredFromInflight: true,
+    };
+    saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
+    appLog('warn', 'impressao_interrompida_recuperada', {
+      total: ids.length,
+      pedidos: inflight?.orderNos || ids,
+      startedAt: inflight?.startedAt || '',
+    });
+    state.printInflight = null;
+    localStorage.removeItem(STORAGE_PRINT_INFLIGHT);
+    state.message = '⚠ Uma impressão de ' + ids.length + ' etiqueta(s) foi interrompida. Confira fisicamente antes de marcar ou liberar os pedidos.';
+    state.messageType = 'error';
+    return true;
+  }
   function systemLogsText() {
     return (state.systemLogs || []).map(row => {
       let details = '';
