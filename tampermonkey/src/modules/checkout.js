@@ -1828,7 +1828,14 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
   function warehouseDisplayName(rawName) {
     const key = norm(rawName || 'Sem armazém');
-    return norm(state.warehouseAliases?.[key] || key);
+    const row = warehouseRegistry.find(item => item.name === key || item.id === key);
+    // Compatibilidade: se o usuário renomeou quando o checkout ainda mostrava
+    // apenas o ID, o apelido antigo continua valendo depois de resolver o nome real.
+    return norm(
+      state.warehouseAliases?.[key] ||
+      (row?.id ? state.warehouseAliases?.[row.id] : '') ||
+      key
+    );
   }
   function saveWarehouseAliases() { saveJson(STORAGE_WAREHOUSE_ALIASES, state.warehouseAliases || {}); }
   function showWarehouseRenameModal() {
@@ -2214,7 +2221,11 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   // Array vazio = todos os armazéns; um ou mais nomes = somente os selecionados.
   function warehouseSelectionList() {
     const raw = state.filters?.warehouses;
-    return Array.isArray(raw) ? raw.map(norm).filter(Boolean) : [];
+    if (!Array.isArray(raw)) return [];
+    return raw.map(norm).filter(Boolean).map(value => {
+      const byId = warehouseRegistry.find(row => row.id === value);
+      return norm(byId?.name || value);
+    });
   }
 
   function orderMatchesWarehouseFilter(order) {
