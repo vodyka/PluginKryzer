@@ -2981,14 +2981,28 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
-        resolve({
+        const result = {
           ok: false,
           timedOut: true,
           success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
           errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
           unknownIds,
-        });
+        };
+
+        // Libera a Promise ANTES de log/UI. Um erro secundário jamais pode
+        // deixar state.loading preso depois de as etiquetas saírem.
+        resolve(result);
+
+        try {
+          appLog('warn', 'plugin_timeout_parcial', {
+            confirmados: job.success.size,
+            erros: job.errors.size,
+            desconhecidos: unknownIds,
+            total: job.expected.size,
+          });
+        } catch (error) {
+          console.warn('[KZ Checkout] falha ao registrar timeout do plugin:', error);
+        }
       }, timeoutMs);
       state.activePrintJob = job;
       try {
