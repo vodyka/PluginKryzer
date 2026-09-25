@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.4.2.1';
+  const VERSION = '0.4.2.2';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -211,6 +211,92 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       warehouseRegistryAt = Date.now();
       return warehouseRegistry;
     }
+  }
+
+  async function loadWarehouseNameById(warehouseId) {
+    const id = norm(warehouseId);
+    if (!id) return '';
+
+    const cached = warehouseNameById(id);
+    if (cached && cached !== id) return cached;
+
+    // Fallback por armazém específico. /api/warehouse-sku/count pode, em algumas
+    // contas, não trazer o nome ou nem listar todos os armazéns. A listagem de SKU
+    // do próprio armazém traz warehouseId + warehouseName nos itens.
+    try {
+      const response = await fetch('/api/warehouse-sku/list', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-requested-with': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({
+          warehouseId: id,
+          sortName: '0',
+          sortValue: '0',
+          pageNum: 1,
+          pageSize: 1,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok || (json?.code != null && Number(json.code) !== 0)) {
+        throw new Error(json?.msg || json?.message || ('HTTP ' + response.status));
+      }
+
+      const rows = extractWarehouseRows(json);
+      let row = rows.find(entry =>
+        norm(entry?.warehouseId || entry?.warehouseIdStr || entry?.id || entry?.idStr) === id
+      );
+
+      // Se extractWarehouseRows não achar porque a resposta tem o nome só dentro
+      // do item de estoque, procura explicitamente na lista paginada.
+      if (!row) {
+        const list =
+          json?.data?.list ||
+          json?.data?.pageInfo?.list ||
+          json?.list ||
+          json?.pageInfo?.list ||
+          [];
+        if (Array.isArray(list)) {
+          row = list.find(entry =>
+            norm(entry?.warehouseId || entry?.warehouseIdStr) === id &&
+            norm(entry?.warehouseName || entry?.wareHouseName)
+          ) || list[0];
+        }
+      }
+
+      const name = norm(
+        row?.warehouseName || row?.wareHouseName || row?.name || row?.title ||
+        row?.displayName || row?.warehouseTitle || row?.whName ||
+        row?.storehouseName || row?.label
+      );
+
+      if (name && name !== id) {
+        const current = warehouseRegistry.find(item => item.id === id);
+        if (current) current.name = name;
+        else warehouseRegistry.push({ id, name, count: 0 });
+        console.log('[KZ Checkout] nome do armazém resolvido por ID:', id, '=>', name);
+        return name;
+      }
+    } catch (error) {
+      console.warn('[KZ Checkout] falha ao resolver nome do armazém', id, error);
+    }
+    return '';
+  }
+
+  async function ensureWarehouseNamesForOrders(list) {
+    const ids = [...new Set((list || []).map(order =>
+      norm(order?.warehouseIdStr || order?.warehouseId || order?.warehouse?.id || '')
+    ).filter(Boolean))];
+
+    const unresolved = ids.filter(id => {
+      const name = warehouseNameById(id);
+      return !name || name === id;
+    });
+
+    if (!unresolved.length) return;
+    await Promise.all(unresolved.map(id => loadWarehouseNameById(id)));
   }
 
   function warehouseNameById(id) {
@@ -1771,6 +1857,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     // /api/order/index frequentemente devolve só o ID do armazém. Resolve primeiro
     // o cadastro real para exibir "Master", "Fornecedor", etc. automaticamente.
     await loadWarehouseRegistry(false);
+    await ensureWarehouseNamesForOrders(list);
 
     let done = 0;
     const normalized = await mapWithConcurrency(list, 3, async (order, index) => {
