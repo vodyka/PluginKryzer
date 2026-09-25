@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.1';
+  const VERSION = '0.5.1.0';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -3444,11 +3444,19 @@ Isso NÃO chama mark-print novamente.`)) return;
     const selectedOrders = group.orders.slice(0, qty);
     const displayLabel = group.label || group.sku || selectedOrders[0]?.orderNo || 'pedido';
     state.loading = true;
+    savePrintInflight(selectedOrders, displayLabel);
     setMessage(`Enviando ${selectedOrders.length} etiqueta(s) ao plugin oficial...`, 'info');
     scheduleRender();
 
     try {
       const printResult = await printOrdersWithPlugin(selectedOrders);
+      appLog('info', 'plugin_resultado_impressao', {
+        total: selectedOrders.length,
+        confirmados: printResult.success?.length || 0,
+        erros: printResult.errors?.length || 0,
+        desconhecidos: printResult.unknownIds?.length || 0,
+        timedOut: printResult.timedOut === true,
+      });
       const successIds = printResult.success.map(row => row.orderId);
       const failedIds = printResult.errors.map(row => row.orderId);
       const unknownIds = Array.isArray(printResult.unknownIds) ? printResult.unknownIds.map(norm).filter(Boolean) : [];
@@ -3531,6 +3539,10 @@ Isso NÃO chama mark-print novamente.`)) return;
         }
       }
 
+      // O resultado já foi persistido em pending e/ou unknownPrint.
+      // A partir daqui não precisamos mais do marcador de lote em andamento.
+      clearPrintInflight('resultado_persistido');
+
       if (unknownIds.length) {
         setMessage(`⚠ ${unknownIds.length} etiqueta(s) sem confirmação do plugin. O campo foi liberado, mas esses pedidos ficaram bloqueados para evitar duplicidade. Confira a impressora.`, 'error');
       } else if (failedIds.length) {
@@ -3546,6 +3558,10 @@ Isso NÃO chama mark-print novamente.`)) return;
       return successIds.length > 0;
     } catch (error) {
       console.error('[KZ Checkout] impressão:', error);
+      // Se algo interromper o fluxo depois de o lote ter sido preparado, converte
+      // o registro persistente em "resultado desconhecido" para nunca reimprimir
+      // silenciosamente após F5.
+      recoverInterruptedPrintIfNeeded();
       const isTimeout = /Tempo esgotado/i.test(error?.message || '');
       if (isTimeout) {
         // Não sabemos se a etiqueta chegou a sair fisicamente — mantém o marcador de
@@ -4766,6 +4782,8 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
   }
 
   function init() {
+    // Recupera lote interrompido antes da primeira consulta de pedidos.
+    recoverInterruptedPrintIfNeeded();
     installDrag();
     try {
       unsafeWindow.KZCheckoutRapido = {
