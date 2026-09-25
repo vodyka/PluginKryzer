@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.4.2.0';
+  const VERSION = '0.4.2.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -116,6 +116,8 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   let refreshSequence = 0;
   let lastOrdersFingerprint = '';
   let countdownTimer = null;
+  let warehouseRegistry = [];
+  let warehouseRegistryAt = 0;
   const skuDetailCache = new Map();
 
   function readJson(key, fallback) {
@@ -133,6 +135,100 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
   function norm(value) {
     return String(value == null ? '' : value).trim();
+  }
+
+  function extractWarehouseRows(json) {
+    const rows = [];
+    const seen = new Set();
+
+    function walk(node, depth = 0) {
+      if (!node || typeof node !== 'object' || depth > 8 || seen.has(node)) return;
+      seen.add(node);
+
+      if (Array.isArray(node)) {
+        const warehouseLike = node.filter(row =>
+          row && typeof row === 'object' &&
+          (row.warehouseId != null || row.warehouseIdStr != null || row.id != null || row.idStr != null) &&
+          (row.warehouseName != null || row.name != null || row.isDefault != null || row.cou != null)
+        );
+        if (warehouseLike.length) rows.push(...warehouseLike);
+        node.forEach(item => walk(item, depth + 1));
+        return;
+      }
+
+      if ((node.warehouseId != null || node.warehouseIdStr != null) &&
+          (node.warehouseName != null || node.name != null || node.isDefault != null || node.cou != null)) {
+        rows.push(node);
+      }
+
+      Object.values(node).forEach(value => {
+        if (value && typeof value === 'object') walk(value, depth + 1);
+      });
+    }
+
+    walk(json);
+
+    const unique = new Map();
+    rows.forEach(row => {
+      const id = norm(row?.warehouseId || row?.warehouseIdStr || row?.id || row?.idStr);
+      if (id && !unique.has(id)) unique.set(id, row);
+    });
+    return [...unique.values()];
+  }
+
+  async function loadWarehouseRegistry(force = false) {
+    const now = Date.now();
+    if (!force && warehouseRegistry.length && (now - warehouseRegistryAt) < 5 * 60 * 1000) {
+      return warehouseRegistry;
+    }
+    try {
+      const response = await fetch('/api/warehouse-sku/count', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-requested-with': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({ searchType: '1', isGroup: 0 }),
+      });
+      const json = await response.json();
+      if (!response.ok || (json?.code != null && Number(json.code) !== 0)) {
+        throw new Error(json?.msg || json?.message || ('HTTP ' + response.status));
+      }
+      warehouseRegistry = extractWarehouseRows(json).map(row => ({
+        id: norm(row?.warehouseId || row?.warehouseIdStr || row?.id || row?.idStr),
+        name: norm(
+          row?.warehouseName || row?.name || row?.title || row?.displayName ||
+          row?.warehouseTitle || row?.whName || row?.storehouseName || row?.label
+        ),
+        count: Number(row?.cou ?? row?.count ?? row?.total ?? row?.skuCount ?? 0),
+      })).filter(row => row.id);
+      warehouseRegistryAt = Date.now();
+      console.log('[KZ Checkout] armazéns identificados:', warehouseRegistry);
+      return warehouseRegistry;
+    } catch (error) {
+      console.warn('[KZ Checkout] não foi possível carregar nomes dos armazéns:', error);
+      warehouseRegistryAt = Date.now();
+      return warehouseRegistry;
+    }
+  }
+
+  function warehouseNameById(id) {
+    const key = norm(id);
+    if (!key) return '';
+    const row = warehouseRegistry.find(item => item.id === key);
+    return norm(row?.name);
+  }
+
+  function resolveOrderWarehouseName(order) {
+    const id = norm(order?.warehouseIdStr || order?.warehouseId || order?.warehouse?.id || '');
+    const apiName = warehouseNameById(id);
+    const rawName = norm(order?.warehouseName || order?.wareHouseName || order?.warehouse?.name || '');
+    // Alguns retornos de /api/order/index trazem o próprio ID em warehouseName.
+    // Quando isso acontecer, prioriza o nome real vindo do cadastro de armazéns.
+    if (apiName) return apiName;
+    if (rawName && rawName !== id) return rawName;
+    return rawName || id || 'Sem armazém';
   }
 
   function normSku(value) {
@@ -1633,7 +1729,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       channel,
       shopName: getOrderShopName(order),
       warehouseId: norm(order?.warehouseIdStr || order?.warehouseId || order?.warehouse?.id || ''),
-      warehouseName: norm(order?.warehouseName || order?.wareHouseName || order?.warehouse?.name || order?.warehouseIdStr || order?.warehouseId || 'Sem armazém'),
+      warehouseName: resolveOrderWarehouseName(order),
       deadlineAt: deadline ? deadline.toISOString() : '',
       priorityAt: priority ? priority.toISOString() : '',
       // "Vence hoje" também precisa cobrir pedidos já atrasados (prazo antes de hoje),
@@ -1671,6 +1767,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       setMessage(`Analisando os SKUs reais de ${list.length} pedido(s)...`, 'info');
       scheduleRender();
     }
+
+    // /api/order/index frequentemente devolve só o ID do armazém. Resolve primeiro
+    // o cadastro real para exibir "Master", "Fornecedor", etc. automaticamente.
+    await loadWarehouseRegistry(false);
 
     let done = 0;
     const normalized = await mapWithConcurrency(list, 3, async (order, index) => {
