@@ -1,0 +1,14 @@
+{
+  "identifier": "upseller-collectors",
+  "description": "Permite somente eventos e controle básico da própria janela nos coletores remotos do UpSeller.",
+  "windows": ["account-*"],
+  "remote": {
+    "urls": ["https://app.upseller.com/*"]
+  },
+  "permissions": [
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-hide",
+    "core:window:allow-show"
+  ]
+}
