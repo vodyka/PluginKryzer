@@ -2,7 +2,6 @@
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-const UPSELLER_LOGIN: &str = "https://app.upseller.com/pt/login";
 const UPSELLER_CHECKOUT: &str =
     "https://app.upseller.com/pt/order/in-process?kzCheckout=1&kzDesktop=1";
 
@@ -24,24 +23,19 @@ fn desktop_bootstrap() -> String {
   const checkoutUrl =
     "https://app.upseller.com/pt/order/in-process?kzCheckout=1&kzDesktop=1";
   const params = new URLSearchParams(window.location.search);
+  const isLogin = window.location.pathname === "/pt/login";
   const isCheckout =
     window.location.pathname === "/pt/order/in-process" &&
     params.get("kzCheckout") === "1";
 
-  // Antes de entrar no checkout, usa a própria sessão do UpSeller para saber
-  // se o usuário já autenticou. O app nunca lê nem armazena a senha.
+  // Desktop dedicado:
+  // - login oficial do UpSeller continua intacto;
+  // - qualquer outra tela autenticada é imediatamente levada ao Checkout;
+  // - não depende de /api/home para decidir se a sessão existe.
   if (!isCheckout) {
-    window.setTimeout(async () => {
-      try {
-        const response = await fetch("/api/home", { credentials: "include" });
-        const json = await response.json();
-        const user = json?.data?.user;
-        const puid = user?.puid || user?.id;
-        if (puid) window.location.replace(checkoutUrl);
-      } catch (_) {
-        // Continua na tela oficial do UpSeller até existir uma sessão válida.
-      }
-    }, 900);
+    if (!isLogin) {
+      window.location.replace(checkoutUrl);
+    }
     return;
   }
 
@@ -83,11 +77,11 @@ fn main() {
 
     tauri::Builder::default()
         .setup(move |app| {
-            let login_url = UPSELLER_LOGIN
+            let checkout_url = UPSELLER_CHECKOUT
                 .parse()
-                .expect("URL de login do UpSeller inválida");
+                .expect("URL do Checkout do UpSeller inválida");
 
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(login_url))
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(checkout_url))
                 .title("Kryzer Checkout")
                 .maximized(true)
                 .min_inner_size(1024.0, 720.0)
