@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.1';
+  const VERSION = '0.5.1.2';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4842,12 +4842,55 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
           scheduleRender();
           return true;
         },
-        async imprimirPedidosUnificado(orderIds, label = '', allowCustomerMessages = false) {
-          const ids = [...new Set((orderIds || []).map(norm).filter(Boolean))];
-          const orders = ids.map(findOrderById).filter(Boolean);
-          if (!orders.length) throw new Error('Nenhum pedido disponível para impressão nesta conta.');
-          if (orders.length !== ids.length) {
-            throw new Error('Um ou mais pedidos não estão mais disponíveis nesta conta.');
+        async imprimirPedidosUnificado(orderRefs, label = '', allowCustomerMessages = false) {
+          const refs = (orderRefs || []).map(ref => {
+            if (ref && typeof ref === 'object') {
+              return {
+                idStr: norm(ref.idStr || ref.orderId || ref.id),
+                authIdStr: norm(ref.authIdStr || ref.authId),
+                orderNo: norm(ref.orderNo || ref.orderNumber || ref.platformOrderNo),
+              };
+            }
+            const value = norm(ref);
+            return { idStr: value, authIdStr: '', orderNo: value };
+          }).filter(ref => ref.idStr || ref.authIdStr || ref.orderNo);
+
+          const unique = [];
+          const seen = new Set();
+          for (const ref of refs) {
+            const key = [ref.idStr, ref.authIdStr, ref.orderNo].filter(Boolean).join('|');
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            unique.push(ref);
+          }
+
+          function locate(ref) {
+            return (state.orders || []).find(order =>
+              (ref.idStr && norm(order.idStr) === ref.idStr) ||
+              (ref.authIdStr && norm(order.authIdStr) === ref.authIdStr) ||
+              (ref.orderNo && norm(order.orderNo) === ref.orderNo)
+            ) || null;
+          }
+
+          let orders = unique.map(locate).filter(Boolean);
+
+          // A central Multi trabalha com snapshots. Entre o snapshot e o clique,
+          // a sessão escondida pode ter atualizado state.orders. Reconsulta uma vez
+          // antes de concluir que o pedido sumiu.
+          if (orders.length !== unique.length) {
+            await requestOrdersRefresh(false);
+            orders = unique.map(locate).filter(Boolean);
+          }
+
+          if (!orders.length) {
+            throw new Error('Nenhum pedido disponível para impressão nesta conta após atualizar a sessão.');
+          }
+          if (orders.length !== unique.length) {
+            const found = new Set(orders.flatMap(order => [norm(order.idStr), norm(order.authIdStr), norm(order.orderNo)]).filter(Boolean));
+            const missing = unique.filter(ref =>
+              ![ref.idStr, ref.authIdStr, ref.orderNo].filter(Boolean).some(value => found.has(value))
+            );
+            throw new Error(`Um ou mais pedidos não estão mais disponíveis nesta conta: ${missing.map(ref => ref.orderNo || ref.idStr || ref.authIdStr).join(', ')}`);
           }
           const flagged = ordersWithCustomerMessage(orders);
           if (flagged.length && !allowCustomerMessages) {
