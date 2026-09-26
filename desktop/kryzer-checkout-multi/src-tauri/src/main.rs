@@ -212,7 +212,9 @@ fn collector_script(slot: u8) -> String {
         const printer = String(payload.printer || "");
         if (printer) bridge.definirImpressoraUnificado(printer);
         result = await bridge.imprimirPedidosUnificado(
-          Array.isArray(payload.orderIds) ? payload.orderIds : [],
+          Array.isArray(payload.orderRefs)
+            ? payload.orderRefs
+            : (Array.isArray(payload.orderIds) ? payload.orderIds : []),
           String(payload.label || ""),
           payload.allowCustomerMessages === true
         );
