@@ -1,319 +1,475 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kryzer Checkout Multi</title>
-  <style>
-    :root { font-family: Inter, Segoe UI, Arial, sans-serif; color:#172033; background:#f5f7fb; }
-    * { box-sizing:border-box; }
-    body { margin:0; min-width:980px; }
-    .top { height:72px; background:#fff; border-bottom:1px solid #e6eaf1; display:flex; align-items:center; justify-content:space-between; padding:0 24px; position:sticky; top:0; z-index:5; }
-    .brand { display:flex; align-items:center; gap:12px; }
-    .logo { width:38px; height:38px; border-radius:10px; display:grid; place-items:center; background:#111827; color:#ff6b1a; font-weight:900; font-size:23px; }
-    h1 { font-size:18px; margin:0; }
-    .subtitle { font-size:11px; color:#7d8798; margin-top:3px; }
-    .status { font-size:12px; color:#657087; }
-    .page { padding:20px 24px 28px; }
-    .accounts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:16px; }
-    .account { background:#fff; border:1px solid #e1e6ef; border-radius:12px; padding:14px; box-shadow:0 2px 8px rgba(15,23,42,.035); }
-    .account-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
-    .account-name { font-weight:800; font-size:14px; }
-    .account-meta { margin-top:4px; color:#7b8496; font-size:11px; min-height:15px; }
-    .pill { display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:5px 9px; font-size:10px; font-weight:800; background:#f0f2f6; color:#667085; }
-    .pill.connected { background:#edfdf3; color:#17803d; }
-    .pill.login_required { background:#fff5e9; color:#b85c00; }
-    .pill.error { background:#fff0f0; color:#c62f2f; }
-    .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
-    .account-stats { display:flex; gap:12px; margin:14px 0 12px; }
-    .mini { flex:1; background:#f7f9fc; border-radius:8px; padding:9px; }
-    .mini b { font-size:18px; display:block; }
-    .mini span { font-size:10px; color:#7d8798; }
-    button { border:1px solid #d8deea; background:#fff; height:34px; border-radius:7px; padding:0 12px; cursor:pointer; font-weight:700; font-size:11px; color:#344054; }
-    button.primary { background:#1267f5; color:#fff; border-color:#1267f5; }
-    .buttons { display:flex; gap:8px; }
-    .summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:16px; }
-    .summary-card { background:#fff; border:1px solid #e1e6ef; border-radius:10px; padding:14px 16px; }
-    .summary-card span { font-size:11px; color:#7c8798; }
-    .summary-card b { display:block; margin-top:5px; font-size:24px; }
-    .panel { background:#fff; border:1px solid #e1e6ef; border-radius:12px; overflow:hidden; }
-    .panel-head { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid #eef1f6; }
-    .panel-title { font-size:14px; font-weight:800; }
-    .filters { display:flex; gap:6px; align-items:center; }
-    .filter { height:30px; }
-    .filter.active { background:#1267f5; color:#fff; border-color:#1267f5; }
-    .search { width:260px; height:32px; border:1px solid #dce2ec; border-radius:7px; padding:0 10px; outline:none; }
-    table { width:100%; border-collapse:collapse; font-size:11px; }
-    th { text-align:left; padding:10px 12px; color:#7c8798; font-weight:700; background:#fafbfc; border-bottom:1px solid #eef1f6; position:sticky; top:72px; }
-    td { padding:10px 12px; border-bottom:1px solid #f0f2f5; vertical-align:top; }
-    tr:hover td { background:#fbfcff; }
-    .order { font-weight:800; }
-    .muted { color:#7d8798; font-size:10px; margin-top:3px; }
-    .sku { font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:10px; }
-    .empty { padding:55px; text-align:center; color:#8d96a7; }
-    .notice { margin-bottom:16px; border:1px solid #cfe0ff; background:#f3f7ff; color:#315b9f; border-radius:9px; padding:10px 13px; font-size:11px; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kryzer Checkout Multi</title>
+<style>
+:root{font-family:Inter,Segoe UI,Arial,sans-serif;color:#142033;background:#f4f6f8}
+*{box-sizing:border-box}
+body{margin:0;min-width:1180px;background:#f4f6f8}
+button,input,select{font:inherit}
+button{cursor:pointer}
+.top{height:72px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between;padding:0 18px;position:sticky;top:0;z-index:20}
+.brand{display:flex;align-items:center;gap:12px}.logo{width:40px;height:40px;border-radius:10px;background:#111827;color:#ff671f;display:grid;place-items:center;font-size:24px;font-weight:900}
+.title{font-size:17px;font-weight:800}.sub{font-size:10px;color:#7a8493;margin-top:3px}.online{border:1px solid #b7e7a1;background:#f1fff0;color:#2e9b16;border-radius:999px;padding:8px 12px;font-size:10px;font-weight:800}
+.layout{display:grid;grid-template-columns:238px minmax(650px,1fr) 310px;gap:16px;padding:16px}
+.card{background:#fff;border:1px solid #e0e5ec;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.02)}
+.side{display:flex;flex-direction:column;gap:12px}.side-card{padding:14px}.side-title{font-size:12px;font-weight:800;margin-bottom:12px}
+.label{font-size:10px;color:#5f6b7a;margin-bottom:6px;display:block}
+.select,.btn,.input{width:100%;height:36px;border:1px solid #d7dde6;border-radius:6px;background:#fff;color:#253043;padding:0 10px}
+.btn{font-size:10px;font-weight:700;text-align:left}.btn.primary{background:#0b63f6;color:white;border-color:#0b63f6;text-align:center}.btn.center{text-align:center}.btn:disabled{opacity:.55;cursor:not-allowed}
+.priority{display:grid;grid-template-columns:1fr 1fr;gap:8px}.priority button{height:34px;border:1px solid #d7dde6;background:#fff;border-radius:5px;font-size:9px}.priority button.active{background:#0b63f6;color:#fff;border-color:#0b63f6}
+.account-mini{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid #f0f2f5}.account-mini:last-child{border-bottom:0}.account-mini b{font-size:10px}.account-mini small{display:block;color:#8a94a4;font-size:8px;margin-top:2px}.dot{width:7px;height:7px;border-radius:50%;background:#aeb7c4;display:inline-block;margin-right:5px}.dot.on{background:#23a455}.account-open{border:0;background:transparent;color:#0b63f6;font-size:9px;font-weight:700;padding:3px}
+.main{min-width:0}.quick{padding:20px 22px}.eyebrow{color:#075ef0;font-size:9px;font-weight:900;letter-spacing:.2px}.quick h2{margin:5px 0 5px;font-size:20px}.quick p{margin:0;color:#7c8796;font-size:10px}.origin{float:right;margin-top:-48px;background:#f2f5ff;color:#5169c7;border-radius:999px;padding:8px 11px;font-size:9px}
+.scan-wrap{display:flex;align-items:center;border:2px solid #1267f5;border-radius:7px;margin-top:18px;height:48px;box-shadow:0 0 0 2px rgba(18,103,245,.07)}.scan-icon{width:50px;text-align:center;color:#1267f5;font-weight:900}.scanner{flex:1;border:0;outline:0;height:100%;font-size:15px}.enter{width:58px;text-align:center;color:#7e8795;font-size:9px}
+.message{margin-top:10px;padding:8px 10px;border-radius:4px;background:#eef5ff;color:#2f5f9f;font-size:10px;min-height:30px}.message.success{background:#edfff2;color:#188343}.message.error{background:#fff0f0;color:#c42d2d}.message.warn{background:#fff8e7;color:#a46100}
+.bar{display:flex;align-items:center;gap:7px;padding:12px;margin-top:12px}.bar-label{font-size:9px;color:#748091;margin-right:3px}.chip{height:30px;padding:0 11px;border:1px solid #dce2ea;border-radius:5px;background:#fff;font-size:9px;font-weight:700}.chip.active{background:#1267f5;border-color:#1267f5;color:#fff}.chip span{display:inline-grid;place-items:center;min-width:18px;height:18px;margin-left:5px;border-radius:999px;background:#f0f2f5;color:#657084}.chip.active span{background:rgba(255,255,255,.2);color:#fff}
+.tabs{margin-top:12px}.tab-head{display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #e7ebf1}.tab{padding:14px 18px;border:0;background:#fff;text-align:left;position:relative}.tab b{font-size:11px}.tab small{display:block;color:#8b94a3;font-size:8px;margin-top:3px}.tab em{position:absolute;right:18px;top:14px;font-style:normal;background:#f2f3f5;border-radius:999px;min-width:23px;height:23px;display:grid;place-items:center;font-size:9px}.tab.active{color:#075ef0}.tab.active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#075ef0}.tab-body{padding:15px 18px;min-height:270px}
+.section-title{font-size:12px;font-weight:800;margin-bottom:4px}.section-sub{font-size:9px;color:#7c8796;margin-bottom:12px}
+.row{display:grid;grid-template-columns:minmax(200px,1.5fr) 110px 125px 115px 90px;gap:10px;align-items:center;padding:11px 10px;border:1px solid #edf0f4;border-radius:7px;margin-bottom:7px;background:#fff}.row:hover{border-color:#cdd9ee}.product{display:flex;align-items:center;gap:9px;min-width:0}.product img{width:38px;height:38px;border-radius:5px;object-fit:cover;background:#f3f4f6}.placeholder{width:38px;height:38px;border-radius:5px;background:#f1f3f6}.product b{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}.product small{font-size:8px;color:#7d8795;display:block;margin-top:3px}.cell{font-size:9px}.deadline{font-size:8px;color:#596579}.row-action{height:30px;border:1px solid #cbd8ee;background:#f5f8ff;color:#0b63f6;border-radius:5px;font-size:9px;font-weight:800}
+.session{padding:14px;border:1px solid #bcd1f7;background:#f5f8ff;border-radius:8px;margin-bottom:12px}.session-head{display:flex;justify-content:space-between;align-items:flex-start}.session h3{margin:0;font-size:12px}.session p{margin:4px 0 0;color:#657187;font-size:9px}.progress{height:7px;background:#e0e8f5;border-radius:999px;margin:10px 0;overflow:hidden}.progress>div{height:100%;background:#1267f5}.required{display:flex;gap:7px;flex-wrap:wrap}.req{border:1px solid #d6dfed;background:#fff;border-radius:6px;padding:7px 9px;font-size:9px}.req.done{border-color:#9edbb0;background:#f1fff5}.session-x{border:0;background:transparent;font-size:17px;color:#6d7788}
+.right{min-width:0}.queue{padding:14px;height:calc(100vh - 104px);position:sticky;top:88px;overflow:hidden;display:flex;flex-direction:column}.queue-head{display:flex;justify-content:space-between;align-items:flex-start}.queue-head b{font-size:12px}.queue-head small{color:#0b63f6;font-size:8px}.queue-search{margin:12px 0 8px}.queue-list{overflow:auto;padding-right:2px}.qrow{display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid #eff2f5}.qrow img{width:34px;height:34px;border-radius:5px;object-fit:cover}.qrow .placeholder{width:34px;height:34px}.qrow div{min-width:0;flex:1}.qrow b{font-size:9px;display:block}.qrow small{font-size:8px;color:#7d8795;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qqty{font-size:10px;font-weight:800;color:#344054}
+.empty{padding:60px 20px;text-align:center;color:#9aa3af;font-size:10px}
+.modal-bg{position:fixed;inset:0;background:rgba(15,23,42,.36);z-index:100;display:grid;place-items:center}.modal{width:420px;background:#fff;border-radius:11px;box-shadow:0 20px 55px rgba(15,23,42,.28);padding:18px}.modal h3{margin:0 0 5px;font-size:15px}.modal p{margin:0 0 14px;color:#6f7b8d;font-size:10px}.qty{display:grid;grid-template-columns:38px 1fr 38px;gap:8px}.qty button,.qty input{height:38px;border:1px solid #d8dee8;border-radius:6px;background:#fff;text-align:center}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.modal-actions button{height:35px;border-radius:6px;border:1px solid #d8dee8;background:#fff;font-size:10px;font-weight:700;padding:0 14px}.modal-actions .primary{background:#1267f5;color:#fff;border-color:#1267f5}
+@media(max-width:1300px){.layout{grid-template-columns:210px minmax(600px,1fr) 270px}.row{grid-template-columns:minmax(180px,1.4fr) 90px 110px 100px 80px}}
+</style>
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <div class="logo">K</div>
-      <div><h1>Kryzer Checkout Multi</h1><div class="subtitle">POC · sessões UpSeller independentes + pedidos unificados</div></div>
+<header class="top">
+  <div class="brand"><div class="logo">K</div><div><div class="title">Checkout por produto</div><div class="sub">Kryzer Checkout Multi · sessões UpSeller independentes</div></div></div>
+  <div class="online" id="topStatus">● Aguardando contas</div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <div class="card side-card">
+      <div class="side-title">Configuração</div>
+      <label class="label">Impressora</label>
+      <select class="select" id="printer"><option value="">Aguardando plugin...</option></select>
+      <button class="btn center" id="refreshAll" style="margin-top:8px">Atualizar pedidos</button>
     </div>
-    <div class="status" id="syncText">Aguardando contas...</div>
-  </header>
 
-  <main class="page">
-    <div class="notice">
-      Esta versão é para validar a arquitetura multi-conta. Ela unifica a leitura dos pedidos. A impressão/bipagem cruzada entre sessões será ligada depois que confirmarmos que as 3 contas permanecem conectadas ao mesmo tempo.
+    <div class="card side-card">
+      <div class="side-title">Contas UpSeller</div>
+      <div id="accountsMini"></div>
     </div>
 
-    <section class="accounts" id="accounts"></section>
+    <div class="card side-card">
+      <div class="side-title">Prioridade</div>
+      <div class="priority">
+        <button id="dueToday">Vence hoje</button>
+        <button id="priorityFirst" class="active">Prazo primeiro</button>
+      </div>
+    </div>
 
-    <section class="summary">
-      <div class="summary-card"><span>Pedidos disponíveis</span><b id="sumAll">0</b></div>
-      <div class="summary-card"><span>Item Único · qtd 1</span><b id="sumSingle1">0</b></div>
-      <div class="summary-card"><span>Item Único · qtd &gt; 1</span><b id="sumSingleMany">0</b></div>
-      <div class="summary-card"><span>Múltiplos Itens</span><b id="sumMultiple">0</b></div>
+    <div class="card side-card">
+      <div class="side-title">Ações</div>
+      <button class="btn primary" id="focusScanner">Ir para leitura</button>
+      <button class="btn center" id="clearSession" style="margin-top:7px">Cancelar checkout atual</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="card quick">
+      <span class="eyebrow">LEITURA RÁPIDA</span>
+      <div class="origin" id="originChip">Origem: múltiplos UpSeller</div>
+      <h2>Escaneie o SKU para iniciar</h2>
+      <p>Os pedidos são unificados, mas cada impressão usa automaticamente a sessão UpSeller de origem.</p>
+      <div class="scan-wrap"><div class="scan-icon">⌁</div><input id="scanner" class="scanner" autocomplete="off" placeholder="Escanear ou inserir SKU"><div class="enter">ENTER</div></div>
+      <div id="message" class="message">Conectando às contas e carregando os pedidos...</div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <div class="panel-title">Pedidos unificados</div>
-        <div class="filters" id="filters"></div>
-        <input class="search" id="search" placeholder="Buscar pedido, SKU ou loja">
+    <section class="card bar" id="accountBar"></section>
+    <section class="card bar" id="warehouseBar"></section>
+
+    <section class="card tabs">
+      <div class="tab-head">
+        <button class="tab active" data-tab="single1"><b>Item Único</b><small>Quantidade = 1</small><em id="countSingle1">0</em></button>
+        <button class="tab" data-tab="singleMany"><b>Item Único</b><small>Quantidade &gt; 1</small><em id="countSingleMany">0</em></button>
+        <button class="tab" data-tab="multiple"><b>Múltiplos Itens</b><small>Mais de um SKU</small><em id="countMultiple">0</em></button>
       </div>
-      <div id="orders"></div>
+      <div class="tab-body">
+        <div id="sessionArea"></div>
+        <div class="section-title" id="listTitle">Pedidos de Item Único</div>
+        <div class="section-sub" id="listSub">Bipe um SKU para imprimir ou clique em um produto.</div>
+        <div id="orderList"></div>
+      </div>
     </section>
   </main>
 
+  <aside class="right">
+    <section class="card queue">
+      <div class="queue-head"><b>SKUs para<br>separar</b><small>Somente esta aba</small></div>
+      <div class="queue-search"><input id="queueSearch" class="input" placeholder="Filtrar por SKU ou nome"></div>
+      <div id="queueList" class="queue-list"></div>
+    </section>
+  </aside>
+</div>
+
+<div id="modalRoot"></div>
+
 <script>
 (() => {
-  const slots = new Map([1,2,3].map(slot => [slot, {
-    slot, status:"loading", puid:"", accountName:"", orderCount:0, orders:[], at:null, message:""
+  const slots = new Map([1,2,3].map(slot => [slot,{
+    slot,status:"loading",puid:"",accountName:"",orders:[],orderCount:0,checkoutStatus:{},message:"",at:null
   }]));
-  let activeSlots = new Set([1,2,3]);
-  let searchText = "";
+  const knownNames={"30945":"Vektor","33745":"Giro X","34552":"Cintra"};
+  let activeAccounts=new Set([1,2,3]);
+  let activeWarehouses=new Set();
+  let activeTab="single1";
+  let priorityFirst=true;
+  let onlyToday=false;
+  let selectedPrinter=localStorage.getItem("kz_multi_printer")||"";
+  let message="Conectando às contas e carregando os pedidos...";
+  let messageType="info";
+  let busy=false;
+  let checkoutSession=null;
+  const pendingRequests=new Map();
 
-  const knownNames = {
-    "30945": "Vektor",
-    "33745": "Giro X",
-    "34552": "Cintra"
-  };
+  const $=sel=>document.querySelector(sel);
+  const esc=v=>String(v??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+  const norm=v=>String(v??"").trim().toUpperCase().replace(/\s+/g,"");
 
-  function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, ch => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-    })[ch]);
+  function accountName(a){return knownNames[a.puid]||a.accountName||(a.puid?"PUID "+a.puid:"Conta "+a.slot)}
+  function connectedSlots(){return [...slots.values()].filter(a=>a.status==="connected")}
+  function allOrders(){
+    const rows=[];
+    for(const a of slots.values()){
+      if(a.status!=="connected")continue;
+      for(const o of a.orders||[])rows.push({...o,accountSlot:a.slot,accountPuid:a.puid,accountName:accountName(a)});
+    }
+    return rows;
   }
-
-  function accountDisplay(a) {
-    return knownNames[a.puid] || a.accountName || (a.puid ? "PUID " + a.puid : "Conta " + a.slot);
+  function orderTime(o){
+    const raw=o.priorityAt||o.deadlineAt||"";
+    const t=new Date(raw).getTime();
+    return Number.isFinite(t)?t:Number.POSITIVE_INFINITY;
   }
-
-  function statusText(status) {
-    if (status === "connected") return "Conectada";
-    if (status === "login_required") return "Login necessário";
-    if (status === "error") return "Erro";
-    return "Aguardando";
+  function sortOrders(rows){
+    return [...rows].sort((a,b)=>{
+      if(priorityFirst){const d=orderTime(a)-orderTime(b);if(d!==0)return d}
+      return String(a.orderNo||"").localeCompare(String(b.orderNo||""),"pt-BR",{numeric:true});
+    });
   }
-
-  function categoryCounts(orders) {
+  function passesGlobal(o){
+    if(!activeAccounts.has(o.accountSlot))return false;
+    if(activeWarehouses.size && !activeWarehouses.has(String(o.warehouseName||"")))return false;
+    if(onlyToday && o.dueToday!==true)return false;
+    return true;
+  }
+  function ordersFor(category=activeTab){return sortOrders(allOrders().filter(o=>o.category===category&&passesGlobal(o)))}
+  function counts(){
+    const rows=allOrders().filter(passesGlobal);
     return {
-      single1: orders.filter(o => o.category === "single1").length,
-      singleMany: orders.filter(o => o.category === "singleMany").length,
-      multiple: orders.filter(o => o.category === "multiple").length
+      single1:rows.filter(o=>o.category==="single1").length,
+      singleMany:rows.filter(o=>o.category==="singleMany").length,
+      multiple:rows.filter(o=>o.category==="multiple").length
     };
   }
-
-  async function openAccount(slot) {
-    try {
-      const windows = await window.__TAURI__.window.getAllWindows();
-      const target = windows.find(win => win.label === "account-" + slot);
-      if (!target) throw new Error("Janela da conta não encontrada.");
-      await target.show();
-      try { await target.setFocus(); } catch (_) {}
-    } catch (error) {
-      alert(error?.message || String(error));
-    }
+  function itemMatches(item,code){
+    const target=norm(code);if(!target)return false;
+    if(norm(item?.sku)===target)return true;
+    return (item?.scanAliases||[]).some(alias=>norm(alias)===target);
   }
-
-  window.openAccount = openAccount;
-
-  function unifiedOrders() {
-    const rows = [];
-    for (const account of slots.values()) {
-      if (!activeSlots.has(account.slot) || account.status !== "connected") continue;
-      for (const order of account.orders || []) {
-        rows.push({
-          ...order,
-          accountSlot: account.slot,
-          accountPuid: account.puid,
-          accountName: accountDisplay(account)
-        });
+  function primaryItem(o){return o.realItems?.[0]||{sku:o.sku,title:o.title,image:o.image,qty:o.totalQty||1,scanAliases:[]}}
+  function groupSingle1(){
+    const map=new Map();
+    for(const o of ordersFor("single1")){
+      const item=primaryItem(o);const key=norm(item.sku);if(!key)continue;
+      if(!map.has(key))map.set(key,{sku:key,title:item.title||o.title||"",image:item.image||o.image||"",orders:[],aliases:new Set()});
+      const g=map.get(key);g.orders.push(o);(item.scanAliases||[]).forEach(x=>g.aliases.add(norm(x)));
+    }
+    return [...map.values()].sort((a,b)=>orderTime(a.orders[0])-orderTime(b.orders[0])||b.orders.length-a.orders.length||a.sku.localeCompare(b.sku,"pt-BR",{numeric:true}));
+  }
+  function queueRows(){
+    const map=new Map();
+    for(const o of ordersFor(activeTab)){
+      for(const item of o.realItems||[]){
+        const key=norm(item.sku);if(!key)continue;
+        if(!map.has(key))map.set(key,{sku:key,title:item.title||o.title||"",image:item.image||o.image||"",qty:0,orders:new Set()});
+        const r=map.get(key);r.qty+=Number(item.qty||0);r.orders.add(o.accountSlot+":"+o.idStr);
       }
     }
-    const q = searchText.trim().toLowerCase();
-    const filtered = !q ? rows : rows.filter(row => {
-      const hay = [
-        row.orderNo, row.accountName, row.shopName, row.channel,
-        row.warehouseName, ...(row.items || []).flatMap(item => [item.sku,item.title])
-      ].join(" ").toLowerCase();
-      return hay.includes(q);
-    });
-    return filtered.sort((a,b) =>
-      String(a.deadlineAt || "").localeCompare(String(b.deadlineAt || "")) ||
-      String(a.orderNo || "").localeCompare(String(b.orderNo || ""))
-    );
+    return [...map.values()].sort((a,b)=>a.sku.localeCompare(b.sku,"pt-BR",{numeric:true}));
   }
 
-  function renderAccounts() {
-    const root = document.getElementById("accounts");
-    root.innerHTML = [...slots.values()].map(a => {
-      const counts = categoryCounts(a.orders || []);
-      const cls = a.status === "connected" ? "connected" :
-                  a.status === "login_required" ? "login_required" :
-                  a.status === "error" ? "error" : "";
-      const meta = [
-        a.puid ? "PUID " + a.puid : "",
-        a.at ? "Atualizado " + new Date(a.at).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : ""
-      ].filter(Boolean).join(" · ");
-      return `
-        <article class="account">
-          <div class="account-head">
-            <div>
-              <div class="account-name">${escapeHtml(accountDisplay(a))}</div>
-              <div class="account-meta">${escapeHtml(meta || a.message || "Sessão independente " + a.slot)}</div>
-            </div>
-            <span class="pill ${cls}"><i class="dot"></i>${statusText(a.status)}</span>
-          </div>
-          <div class="account-stats">
-            <div class="mini"><b>${a.orderCount || 0}</b><span>pedidos</span></div>
-            <div class="mini"><b>${counts.single1}</b><span>item único</span></div>
-            <div class="mini"><b>${counts.multiple}</b><span>múltiplos</span></div>
-          </div>
-          <div class="buttons">
-            <button class="primary" onclick="openAccount(${a.slot})">${a.status === "connected" ? "Abrir sessão" : "Conectar conta"}</button>
-          </div>
-        </article>
-      `;
-    }).join("");
+  function setMessage(text,type="info"){message=String(text||"");messageType=type;renderMessage()}
+  function renderMessage(){const el=$("#message");el.textContent=message;el.className="message "+(messageType==="info"?"":messageType)}
+  function focusScanner(){setTimeout(()=>$("#scanner")?.focus(),30)}
+
+  async function openAccount(slot){
+    try{
+      const wins=await window.__TAURI__.window.getAllWindows();
+      const w=wins.find(x=>x.label==="account-"+slot);
+      if(!w)throw new Error("Janela da conta não encontrada.");
+      await w.show();try{await w.setFocus()}catch(_){}
+    }catch(e){setMessage(e?.message||String(e),"error")}
   }
+  window.openAccount=openAccount;
 
-  function renderFilters() {
-    const root = document.getElementById("filters");
-    const connected = [...slots.values()].filter(a => a.status === "connected");
-    root.innerHTML = `
-      <button class="filter ${activeSlots.size === 3 ? "active":""}" data-all="1">Todas</button>
-      ${connected.map(a => `
-        <button class="filter ${activeSlots.has(a.slot) ? "active":""}" data-slot="${a.slot}">
-          ${escapeHtml(accountDisplay(a))}
-        </button>
-      `).join("")}
-    `;
-
-    root.querySelector('[data-all="1"]')?.addEventListener("click", () => {
-      activeSlots = new Set([1,2,3]);
-      render();
-    });
-    root.querySelectorAll("[data-slot]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const slot = Number(btn.dataset.slot);
-        if (activeSlots.has(slot)) activeSlots.delete(slot);
-        else activeSlots.add(slot);
-        render();
-      });
-    });
-  }
-
-  function renderOrders() {
-    const rows = unifiedOrders();
-    const allActive = [];
-    for (const a of slots.values()) {
-      if (activeSlots.has(a.slot) && a.status === "connected") {
-        allActive.push(...(a.orders || []));
+  function requestId(){return "multi-"+Date.now()+"-"+Math.random().toString(36).slice(2,9)}
+  function callAccount(slot,action,payload={},timeoutMs=90000){
+    return new Promise(async(resolve,reject)=>{
+      const id=requestId();
+      const timer=setTimeout(()=>{pendingRequests.delete(id);reject(new Error("Tempo esgotado aguardando a conta "+slot+"."))},timeoutMs);
+      pendingRequests.set(id,{resolve,reject,timer});
+      try{
+        await window.__TAURI__.event.emitTo("account-"+slot,"kryzer-account-action",{requestId:id,action,payload});
+      }catch(e){
+        clearTimeout(timer);pendingRequests.delete(id);reject(e);
       }
-    }
-    const counts = categoryCounts(allActive);
-    document.getElementById("sumAll").textContent = allActive.length;
-    document.getElementById("sumSingle1").textContent = counts.single1;
-    document.getElementById("sumSingleMany").textContent = counts.singleMany;
-    document.getElementById("sumMultiple").textContent = counts.multiple;
+    });
+  }
 
-    const root = document.getElementById("orders");
-    if (!rows.length) {
-      root.innerHTML = '<div class="empty">Nenhum pedido das contas selecionadas.</div>';
+  async function refreshAll(){
+    if(busy)return;
+    busy=true;setMessage("Atualizando pedidos das contas conectadas...","info");render();
+    try{
+      for(const a of connectedSlots()){
+        try{await callAccount(a.slot,"refresh",{},30000)}catch(_){}
+      }
+      setMessage("Pedidos atualizados.","success");
+    }finally{busy=false;render();focusScanner()}
+  }
+
+  function removeLocalOrders(slot,ids){
+    const a=slots.get(slot);if(!a)return;
+    const set=new Set(ids.map(String));
+    a.orders=(a.orders||[]).filter(o=>!set.has(String(o.idStr)));
+    a.orderCount=a.orders.length;
+  }
+
+  async function printOrders(orders,label=""){
+    if(!orders?.length)return false;
+    if(busy)return false;
+    if(!selectedPrinter){setMessage("Selecione uma impressora antes de imprimir.","error");return false}
+
+    const flagged=orders.filter(o=>String(o.msgContent||"").trim());
+    let allowCustomerMessages=false;
+    if(flagged.length){
+      const text=flagged.map(o=>(o.orderNo||o.idStr)+": "+o.msgContent).join("\n\n");
+      if(!window.confirm("ATENÇÃO — mensagem do cliente\n\n"+text+"\n\nDeseja continuar com a impressão?")){
+        setMessage("Impressão cancelada para conferência da mensagem do cliente.","warn");return false;
+      }
+      allowCustomerMessages=true;
+    }
+
+    busy=true;render();
+    const bySlot=new Map();
+    for(const o of orders){
+      if(!bySlot.has(o.accountSlot))bySlot.set(o.accountSlot,[]);
+      bySlot.get(o.accountSlot).push(o);
+    }
+
+    let success=0,failed=0;
+    try{
+      for(const [slot,rows] of bySlot.entries()){
+        setMessage("Imprimindo "+rows.length+" etiqueta(s) em "+accountName(slots.get(slot))+"...","info");
+        const response=await callAccount(slot,"print_orders",{
+          orderIds:rows.map(o=>o.idStr),
+          label:label||rows[0]?.sku||rows[0]?.orderNo||"Checkout Multi",
+          printer:selectedPrinter,
+          allowCustomerMessages
+        },95000);
+        if(!response?.ok)throw new Error(response?.error||"Falha na sessão da conta.");
+        const result=response.result||{};
+        if(result?.needsCustomerMessage)throw new Error("A conta solicitou confirmação de mensagem do cliente.");
+        if(result?.ok===true){
+          success+=rows.length;removeLocalOrders(slot,rows.map(o=>o.idStr));
+        }else{
+          failed+=rows.length;
+        }
+      }
+      if(failed) setMessage("✓ "+success+" impressa(s). ✗ "+failed+" falharam. Confira as contas.","error");
+      else setMessage("✓ "+success+" etiqueta(s) impressa(s) e marcada(s).","success");
+      checkoutSession=null;
+      return failed===0&&success>0;
+    }catch(e){
+      setMessage(e?.message||String(e),"error");return false;
+    }finally{
+      busy=false;render();focusScanner();
+    }
+  }
+
+  function buildSession(order){
+    return {
+      order,
+      required:(order.realItems||[]).map(item=>({
+        sku:String(item.sku||""),title:item.title||"",qty:Number(item.qty||1),scanned:0,
+        scanAliases:Array.isArray(item.scanAliases)?item.scanAliases:[]
+      }))
+    };
+  }
+  function sessionProgress(){
+    if(!checkoutSession)return{scanned:0,total:0,complete:false};
+    let scanned=0,total=0;
+    for(const r of checkoutSession.required){scanned+=r.scanned;total+=r.qty}
+    return{scanned,total,complete:total>0&&scanned>=total};
+  }
+  async function scanSession(code){
+    const item=checkoutSession.required.find(r=>itemMatches(r,code));
+    if(!item){setMessage("SKU "+norm(code)+" não pertence ao pedido "+(checkoutSession.order.orderNo||checkoutSession.order.idStr)+".","error");return}
+    if(item.scanned>=item.qty){setMessage("O SKU "+item.sku+" já atingiu "+item.qty+"/"+item.qty+" neste pedido.","error");return}
+    item.scanned++;const p=sessionProgress();setMessage("Leitura confirmada: "+item.sku+" · "+p.scanned+"/"+p.total+".","success");render();
+    if(p.complete){
+      setMessage("Pedido completo. Enviando a etiqueta para impressão...","success");
+      await printOrders([checkoutSession.order],checkoutSession.order.orderNo||"Pedido");
+    }else focusScanner();
+  }
+  function startSession(order,firstCode=""){
+    checkoutSession=buildSession(order);activeTab=order.category;setMessage("Checkout aberto para "+(order.orderNo||order.idStr)+". Continue bipando os itens.","info");render();
+    if(firstCode)scanSession(firstCode);else focusScanner();
+  }
+
+  function showQtyModal(group){
+    const max=group.orders.length;
+    $("#modalRoot").innerHTML=`<div class="modal-bg"><div class="modal">
+      <h3>SKU ${esc(group.sku)}</h3>
+      <p>${max} pedido(s) disponíveis nas contas selecionadas.</p>
+      <label class="label">Quantidade para imprimir</label>
+      <div class="qty"><button id="qtyMinus">−</button><input id="qtyInput" type="number" min="1" max="${max}" value="${max}"><button id="qtyPlus">+</button></div>
+      <div class="modal-actions"><button id="qtyCancel">Cancelar</button><button class="primary" id="qtyPrint">Imprimir</button></div>
+    </div></div>`;
+    const input=$("#qtyInput");const clamp=v=>Math.max(1,Math.min(max,parseInt(v||"1",10)||1));
+    $("#qtyMinus").onclick=()=>input.value=clamp(Number(input.value)-1);
+    $("#qtyPlus").onclick=()=>input.value=clamp(Number(input.value)+1);
+    $("#qtyCancel").onclick=()=>{$("#modalRoot").innerHTML="";focusScanner()};
+    $("#qtyPrint").onclick=async()=>{const qty=clamp(input.value);$("#modalRoot").innerHTML="";await printOrders(group.orders.slice(0,qty),group.sku)};
+    input.onkeydown=e=>{if(e.key==="Enter")$("#qtyPrint").click();if(e.key==="Escape")$("#qtyCancel").click()};
+    setTimeout(()=>{input.focus();input.select()},30);
+  }
+
+  async function handleScan(raw){
+    if(busy)return;
+    const code=norm(raw);$("#scanner").value="";if(!code)return;
+    if(checkoutSession){await scanSession(code);return}
+
+    const available=allOrders().filter(passesGlobal);
+    const direct=available.find(o=>norm(o.orderNo)===code);
+    if(direct){startSession(direct);return}
+
+    if(activeTab==="single1"){
+      const group=groupSingle1().find(g=>g.sku===code||g.aliases.has(code));
+      if(!group){setMessage("SKU "+code+" não encontrado em Item Único.","error");return}
+      if(group.orders.length===1)await printOrders(group.orders,group.sku);
+      else showQtyModal(group);
       return;
     }
 
-    root.innerHTML = `
-      <table>
-        <thead><tr>
-          <th>Conta</th><th>Pedido</th><th>Produtos</th><th>Loja / canal</th>
-          <th>Armazém</th><th>Tipo</th><th>Prazo</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(o => {
-            const skus = (o.items || []).map(i => (i.qty || 1) + "x " + (i.sku || i.title)).join(" · ");
-            const type = o.category === "multiple" ? "Múltiplos Itens" :
-              o.category === "singleMany" ? "Item Único > 1" : "Item Único = 1";
-            return `
-              <tr>
-                <td><b>${escapeHtml(o.accountName)}</b><div class="muted">PUID ${escapeHtml(o.accountPuid || "-")}</div></td>
-                <td><div class="order">${escapeHtml(o.orderNo || o.idStr)}</div></td>
-                <td class="sku">${escapeHtml(skus || "—")}</td>
-                <td>${escapeHtml(o.shopName || "—")}<div class="muted">${escapeHtml(o.channel || "")}</div></td>
-                <td>${escapeHtml(o.warehouseName || o.warehouseId || "—")}</td>
-                <td>${escapeHtml(type)}</td>
-                <td>${escapeHtml(o.deadlineAt || "—")}</td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
-    `;
-  }
-
-  function render() {
-    renderAccounts();
-    renderFilters();
-    renderOrders();
-    const connected = [...slots.values()].filter(a => a.status === "connected").length;
-    const total = [...slots.values()].reduce((sum,a) => sum + (a.status === "connected" ? Number(a.orderCount||0) : 0),0);
-    document.getElementById("syncText").textContent =
-      connected + " conta(s) conectada(s) · " + total + " pedido(s) disponíveis";
-  }
-
-  document.getElementById("search").addEventListener("input", e => {
-    searchText = e.target.value || "";
-    renderOrders();
-  });
-
-  async function start() {
-    render();
-    try {
-      await window.__TAURI__.event.listen("kryzer-account-snapshot", event => {
-        const payload = event.payload || {};
-        const slot = Number(payload.slot);
-        if (!slots.has(slot)) return;
-        const previous = slots.get(slot);
-        slots.set(slot, {
-          ...previous,
-          ...payload,
-          slot,
-          orders: Array.isArray(payload.orders) ? payload.orders : previous.orders,
-          orderCount: payload.status === "connected"
-            ? Number(payload.orderCount || (payload.orders || []).length)
-            : (payload.status === "login_required" ? 0 : previous.orderCount)
-        });
-        render();
-      });
-    } catch (error) {
-      document.getElementById("syncText").textContent = "Falha na ponte Tauri: " + (error?.message || error);
+    if(activeTab==="singleMany"){
+      const order=ordersFor("singleMany").find(o=>itemMatches(primaryItem(o),code));
+      if(!order){setMessage("SKU "+code+" não encontrado em Item Único > 1.","error");return}
+      startSession(order,code);return;
     }
+
+    const order=ordersFor("multiple").find(o=>(o.realItems||[]).some(item=>itemMatches(item,code)));
+    if(!order){setMessage("SKU "+code+" não encontrado em Múltiplos Itens.","error");return}
+    startSession(order,code);
   }
 
-  start();
+  function renderAccountsMini(){
+    $("#accountsMini").innerHTML=[...slots.values()].map(a=>`<div class="account-mini"><div><b><i class="dot ${a.status==="connected"?"on":""}"></i>${esc(accountName(a))}</b><small>${a.status==="connected"?"PUID "+esc(a.puid||"-")+" · "+(a.orders?.length||0)+" pedidos":esc(a.message||"Login necessário")}</small></div><button class="account-open" onclick="openAccount(${a.slot})">${a.status==="connected"?"Abrir":"Conectar"}</button></div>`).join("");
+  }
+  function renderPrinter(){
+    const printers=[...new Set(connectedSlots().flatMap(a=>a.checkoutStatus?.printers||[]).filter(Boolean))];
+    const select=$("#printer");const current=selectedPrinter;
+    select.innerHTML=(printers.length?'<option value="">Selecione...</option>'+printers.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join(""):'<option value="">Plugin sem impressoras</option>');
+    if(printers.includes(current))select.value=current;
+    else if(!current&&printers.length===1){selectedPrinter=printers[0];select.value=printers[0];localStorage.setItem("kz_multi_printer",selectedPrinter)}
+  }
+  function renderBars(){
+    const connected=connectedSlots();
+    const total=connected.reduce((s,a)=>s+(a.orders?.length||0),0);
+    $("#accountBar").innerHTML=`<span class="bar-label">Contas</span><button class="chip ${activeAccounts.size===3?"active":""}" data-all-accounts>Todos <span>${total}</span></button>${connected.map(a=>`<button class="chip ${activeAccounts.has(a.slot)?"active":""}" data-account="${a.slot}">${esc(accountName(a))} <span>${a.orders?.length||0}</span></button>`).join("")}`;
+    $("#accountBar").querySelector("[data-all-accounts]")?.addEventListener("click",()=>{activeAccounts=new Set([1,2,3]);render()});
+    $("#accountBar").querySelectorAll("[data-account]").forEach(b=>b.onclick=()=>{const s=Number(b.dataset.account);activeAccounts.has(s)?activeAccounts.delete(s):activeAccounts.add(s);render()});
+
+    const wh=new Map();
+    for(const o of allOrders().filter(o=>activeAccounts.has(o.accountSlot))){const name=String(o.warehouseName||o.warehouseId||"Sem armazém");wh.set(name,(wh.get(name)||0)+1)}
+    $("#warehouseBar").innerHTML=`<span class="bar-label">Filtrar pedidos por armazém</span><button class="chip ${activeWarehouses.size===0?"active":""}" data-all-wh>Todos <span>${[...wh.values()].reduce((a,b)=>a+b,0)}</span></button>${[...wh.entries()].sort((a,b)=>a[0].localeCompare(b[0],"pt-BR")).map(([name,count])=>`<button class="chip ${activeWarehouses.has(name)?"active":""}" data-wh="${esc(name)}">${esc(name)} <span>${count}</span></button>`).join("")}`;
+    $("#warehouseBar").querySelector("[data-all-wh]")?.addEventListener("click",()=>{activeWarehouses.clear();render()});
+    $("#warehouseBar").querySelectorAll("[data-wh]").forEach(b=>b.onclick=()=>{const w=b.dataset.wh;activeWarehouses.has(w)?activeWarehouses.delete(w):activeWarehouses.add(w);render()});
+  }
+  function renderTabs(){
+    const c=counts();$("#countSingle1").textContent=c.single1;$("#countSingleMany").textContent=c.singleMany;$("#countMultiple").textContent=c.multiple;
+    document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===activeTab));
+  }
+  function imageHtml(src,title){return src?`<img src="${esc(src)}" alt="${esc(title||"")}">`:'<span class="placeholder"></span>'}
+  function renderList(){
+    const root=$("#orderList");
+    if(activeTab==="single1"){
+      $("#listTitle").textContent="Pedidos de Item Único";$("#listSub").textContent="Bipe um SKU para imprimir em massa ou clique em um produto.";
+      const groups=groupSingle1();
+      if(!groups.length){root.innerHTML='<div class="empty">Nenhum pedido de Item Único.</div>';return}
+      root.innerHTML=groups.map(g=>{const accounts=[...new Set(g.orders.map(o=>o.accountName))].join(", ");const first=g.orders[0];return `<div class="row">
+        <div class="product">${imageHtml(g.image,g.title)}<div><b>${esc(g.title||"Produto sem nome")}</b><small>SKU ${esc(g.sku)} · ${esc(accounts)}</small></div></div>
+        <div class="cell"><b>${g.orders.length}</b> pedido(s)</div>
+        <div class="cell">${esc(first.shopName||first.channel||"—")}</div>
+        <div class="deadline">${esc(first.deadlineAt||"—")}</div>
+        <button class="row-action" data-group="${esc(g.sku)}">Separar</button>
+      </div>`}).join("");
+      root.querySelectorAll("[data-group]").forEach(b=>b.onclick=()=>{const g=groupSingle1().find(x=>x.sku===b.dataset.group);if(!g)return;if(g.orders.length===1)printOrders(g.orders,g.sku);else showQtyModal(g)});
+      return;
+    }
+
+    const rows=ordersFor(activeTab);
+    $("#listTitle").textContent=activeTab==="singleMany"?"Pedidos de Item Único — quantidade > 1":"Pedidos com múltiplos itens";
+    $("#listSub").textContent="1 clique abre a separação; a bipagem segue a composição real do pedido.";
+    if(!rows.length){root.innerHTML='<div class="empty">Nenhum pedido nesta aba.</div>';return}
+    root.innerHTML=rows.map(o=>{const items=(o.realItems||[]).map(i=>i.qty+"× "+i.sku).join(" · ");const first=primaryItem(o);return `<div class="row">
+      <div class="product">${imageHtml(first.image||o.image,first.title||o.title)}<div><b>${esc(o.orderNo||o.idStr)}</b><small>${esc(items)} · ${esc(o.accountName)}</small></div></div>
+      <div class="cell"><b>${o.totalQty||1}</b> unidade(s)</div>
+      <div class="cell">${esc(o.shopName||o.channel||"—")}</div>
+      <div class="deadline">${esc(o.deadlineAt||"—")}</div>
+      <button class="row-action" data-order="${esc(o.accountSlot+":"+o.idStr)}">Separar</button>
+    </div>`}).join("");
+    root.querySelectorAll("[data-order]").forEach(b=>b.onclick=()=>{const [s,id]=b.dataset.order.split(":");const o=allOrders().find(x=>String(x.accountSlot)===s&&String(x.idStr)===id);if(o)startSession(o)});
+  }
+  function renderSession(){
+    const root=$("#sessionArea");if(!checkoutSession){root.innerHTML="";return}
+    const p=sessionProgress();root.innerHTML=`<div class="session"><div class="session-head"><div><h3>Separando ${esc(checkoutSession.order.orderNo||checkoutSession.order.idStr)}</h3><p>${esc(checkoutSession.order.accountName)} · ${p.scanned}/${p.total} unidades conferidas</p></div><button class="session-x" id="sessionClose">×</button></div><div class="progress"><div style="width:${p.total?Math.min(100,p.scanned/p.total*100):0}%"></div></div><div class="required">${checkoutSession.required.map(r=>`<div class="req ${r.scanned>=r.qty?"done":""}"><b>${esc(r.sku)}</b> · ${r.scanned}/${r.qty}</div>`).join("")}</div></div>`;
+    $("#sessionClose").onclick=()=>{checkoutSession=null;setMessage("Checkout cancelado. Nenhuma etiqueta foi impressa.","warn");render();focusScanner()};
+  }
+  function renderQueue(){
+    const q=norm($("#queueSearch")?.value||"");const rows=queueRows().filter(r=>!q||norm(r.sku+" "+r.title).includes(q));
+    $("#queueList").innerHTML=rows.length?rows.map(r=>`<div class="qrow">${imageHtml(r.image,r.title)}<div><b>${esc(r.sku)}</b><small>${esc(r.title||"Produto sem nome")} · ${r.orders.size} pedido(s)</small></div><span class="qqty">${r.qty}</span></div>`).join(""):'<div class="empty">Nenhum SKU.</div>';
+  }
+  function render(){
+    const connected=connectedSlots();const total=connected.reduce((s,a)=>s+(a.orders?.length||0),0);const plugins=connected.filter(a=>a.checkoutStatus?.agentOnline).length;
+    $("#topStatus").textContent="● "+connected.length+" conta(s) · "+total+" pedido(s) · plugin "+plugins+"/"+connected.length;
+    $("#originChip").textContent="Origem: "+connected.length+" conta(s) UpSeller";
+    renderAccountsMini();renderPrinter();renderBars();renderTabs();renderSession();renderList();renderQueue();renderMessage();
+    $("#dueToday").classList.toggle("active",onlyToday);$("#priorityFirst").classList.toggle("active",priorityFirst);
+    $("#scanner").disabled=busy;
+  }
+
+  $("#printer").onchange=e=>{selectedPrinter=e.target.value||"";localStorage.setItem("kz_multi_printer",selectedPrinter)};
+  $("#scanner").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();handleScan(e.target.value)}});
+  $("#queueSearch").addEventListener("input",renderQueue);
+  $("#refreshAll").onclick=refreshAll;$("#focusScanner").onclick=focusScanner;
+  $("#clearSession").onclick=()=>{checkoutSession=null;setMessage("Checkout atual cancelado.","warn");render();focusScanner()};
+  $("#dueToday").onclick=()=>{onlyToday=!onlyToday;render()};
+  $("#priorityFirst").onclick=()=>{priorityFirst=!priorityFirst;render()};
+  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{activeTab=t.dataset.tab;checkoutSession=null;render();focusScanner()});
+
+  async function start(){
+    render();
+    await window.__TAURI__.event.listen("kryzer-account-snapshot",event=>{
+      const p=event.payload||{};const slot=Number(p.slot);if(!slots.has(slot))return;
+      const prev=slots.get(slot);
+      slots.set(slot,{...prev,...p,slot,orders:Array.isArray(p.orders)?p.orders:prev.orders,checkoutStatus:p.checkoutStatus||prev.checkoutStatus||{}});
+      if(p.status==="connected"&&message.startsWith("Conectando"))setMessage("Aguardando leitura de SKU...","info");
+      render();
+    });
+    await window.__TAURI__.event.listen("kryzer-account-action-response",event=>{
+      const p=event.payload||{};const waiter=pendingRequests.get(String(p.requestId||""));if(!waiter)return;
+      clearTimeout(waiter.timer);pendingRequests.delete(String(p.requestId||""));waiter.resolve(p);
+    });
+    setInterval(render,5000);
+    focusScanner();
+  }
+  start().catch(e=>setMessage(e?.message||String(e),"error"));
 })();
 </script>
 </body>
