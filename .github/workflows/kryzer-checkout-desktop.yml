@@ -1,0 +1,43 @@
+name: Build Kryzer Checkout Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "desktop/kryzer-checkout/**"
+      - "tampermonkey/src/modules/checkout.js"
+      - ".github/workflows/kryzer-checkout-desktop.yml"
+
+jobs:
+  windows:
+    name: Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/kryzer-checkout/src-tauri
+
+      - name: Build Kryzer Checkout
+        shell: pwsh
+        run: cargo build --release --manifest-path desktop/kryzer-checkout/src-tauri/Cargo.toml
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item desktop/kryzer-checkout/src-tauri/target/release/kryzer-checkout.exe artifact/Kryzer-Checkout.exe
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kryzer-Checkout-Windows
+          path: artifact/Kryzer-Checkout.exe
+          if-no-files-found: error
