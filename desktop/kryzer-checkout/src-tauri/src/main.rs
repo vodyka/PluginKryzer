@@ -13,37 +13,109 @@ const CHECKOUT_SCRIPT: &str =
 fn desktop_bootstrap() -> String {
     let mut script = String::from(
         r#"
-(() => {
+(async () => {
   if (window.top !== window) return;
   if (window.location.hostname !== "app.upseller.com") return;
 
-  // Compatibilidade com o checkout que hoje também roda como userscript.
-  window.unsafeWindow = window;
-
   const checkoutUrl =
     "https://app.upseller.com/pt/order/in-process?kzCheckout=1&kzDesktop=1";
+  const loginUrl = "https://app.upseller.com/pt/login";
+
+  async function validateUpsellerSession() {
+    try {
+      const body = new URLSearchParams({
+        timeType: "0",
+        searchType: "0",
+        searchValue: "",
+        sortName: "1",
+        sortValue: "0",
+        orderState: "in_process",
+        isVoided: "0",
+        labelStatus: "success",
+        pageNum: "1",
+        pageSize: "1",
+        warehouseType: "0",
+        printCount: "0"
+      });
+
+      const response = await fetch("/api/order/index", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      });
+      const json = await response.json();
+      const code = json?.code ?? json?.status ?? json?.data?.code;
+      const ok =
+        code === 0 || code === 200 || code === "0" || code === "200" ||
+        json?.success === true || json?.ok === true ||
+        json?.msg === "success" || json?.message === "success";
+
+      return {
+        ok,
+        message: String(json?.msg || json?.message || "")
+      };
+    } catch (error) {
+      return { ok: false, message: String(error?.message || error || "") };
+    }
+  }
+
   const params = new URLSearchParams(window.location.search);
   const isLogin = window.location.pathname === "/pt/login";
   const isCheckout =
     window.location.pathname === "/pt/order/in-process" &&
     params.get("kzCheckout") === "1";
 
-  // Desktop dedicado:
-  // - login oficial do UpSeller continua intacto;
-  // - qualquer outra tela autenticada é imediatamente levada ao Checkout;
-  // - não depende de /api/home para decidir se a sessão existe.
+  // Na tela de login, aguarda a própria sessão do UpSeller ficar válida.
+  // Assim funciona mesmo se o login for uma SPA e não fizer reload completo.
+  if (isLogin) {
+    if (window.__KRYZER_LOGIN_WATCH__) return;
+    window.__KRYZER_LOGIN_WATCH__ = true;
+
+    const checkLogin = async () => {
+      const validation = await validateUpsellerSession();
+      if (validation.ok) {
+        window.location.replace(checkoutUrl);
+      }
+    };
+
+    window.setTimeout(checkLogin, 800);
+    window.setInterval(checkLogin, 1500);
+    return;
+  }
+
+  // Desktop dedicado: qualquer tela autenticada do UpSeller volta ao Checkout.
   if (!isCheckout) {
-    if (!isLogin) {
-      window.location.replace(checkoutUrl);
+    window.location.replace(checkoutUrl);
+    return;
+  }
+
+  // IMPORTANTE: a página do UpSeller pode renderizar mesmo sem uma sessão de API
+  // válida. Só inicia o Kryzer depois que /api/order/index confirmar autenticação.
+  const validation = await validateUpsellerSession();
+  if (!validation.ok) {
+    const message = validation.message.toLowerCase();
+    if (message.includes("validated.failed") ||
+        message.includes("login") ||
+        message.includes("unauthorized") ||
+        message.includes("session")) {
+      window.location.replace(loginUrl);
+      return;
     }
+
+    // Na dúvida também pede login: é mais seguro do que abrir um Checkout vazio
+    // parecendo autenticado.
+    window.location.replace(loginUrl);
     return;
   }
 
   if (window.__KRYZER_DESKTOP_CHECKOUT__) return;
   window.__KRYZER_DESKTOP_CHECKOUT__ = true;
 
+  // Compatibilidade com o checkout que hoje também roda como userscript.
+  window.unsafeWindow = window;
+
   // Camada básica de endurecimento do protótipo.
-  // Não é tratada como proteção absoluta contra engenharia reversa.
   document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   }, true);
