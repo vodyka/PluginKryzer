@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.0';
+  const VERSION = '0.5.1.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4819,6 +4819,58 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
         limparCacheKits() { skuDetailCache.clear(); return requestOrdersRefresh(true); },
         reconectarPlugin() { return refreshAgent(); },
         atualizarPedidosUnificado() { return requestOrdersRefresh(false); },
+        statusUnificado() {
+          return {
+            version: VERSION,
+            agentOnline: state.agentOnline === true,
+            pluginStatus: state.pluginStatus || '',
+            printers: Array.isArray(state.printers) ? [...state.printers] : [],
+            printer: state.printer || '',
+            loading: state.loading === true,
+            refreshing: state.refreshing === true,
+            message: state.message || '',
+            messageType: state.messageType || 'info',
+            pendingCount: state.pending?.orderIds?.length || 0,
+            unknownPrintCount: state.unknownPrint?.orderIds?.length || 0,
+          };
+        },
+        definirImpressoraUnificado(printer) {
+          const value = norm(printer);
+          if (!value) return false;
+          state.printer = value;
+          localStorage.setItem(STORAGE_PRINTER, value);
+          scheduleRender();
+          return true;
+        },
+        async imprimirPedidosUnificado(orderIds, label = '', allowCustomerMessages = false) {
+          const ids = [...new Set((orderIds || []).map(norm).filter(Boolean))];
+          const orders = ids.map(findOrderById).filter(Boolean);
+          if (!orders.length) throw new Error('Nenhum pedido disponível para impressão nesta conta.');
+          if (orders.length !== ids.length) {
+            throw new Error('Um ou mais pedidos não estão mais disponíveis nesta conta.');
+          }
+          const flagged = ordersWithCustomerMessage(orders);
+          if (flagged.length && !allowCustomerMessages) {
+            return {
+              ok: false,
+              needsCustomerMessage: true,
+              messages: flagged.map(order => ({
+                orderId: order.idStr,
+                orderNo: order.orderNo || order.idStr,
+                message: order.msgContent || order.raw?.msgContent || '',
+              })),
+            };
+          }
+          const first = orders[0];
+          const ok = await executePrint({
+            label: norm(label) || (orders.length > 1 ? `${orders.length} pedidos unificados` : (first.orderNo || first.idStr)),
+            sku: first.sku || first.realItems?.[0]?.sku || 'PEDIDO',
+            title: first.title || first.realItems?.[0]?.title || '',
+            image: first.image || first.realItems?.[0]?.image || '',
+            orders,
+          }, orders.length);
+          return { ok: ok === true };
+        },
         snapshotUnificado() {
           return (state.orders || []).map(order => ({
             key: order.key,
