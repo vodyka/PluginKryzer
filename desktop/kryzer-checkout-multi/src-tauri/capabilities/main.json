@@ -3,6 +3,7 @@
   "description": "Permissões da central local do Kryzer Checkout Multi.",
   "windows": ["main"],
   "permissions": [
+    "core:event:default",
     "core:default",
     "core:window:allow-show",
     "core:window:allow-hide",
