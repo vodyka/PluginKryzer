@@ -267,7 +267,11 @@ button{cursor:pointer}
       for(const [slot,rows] of bySlot.entries()){
         setMessage("Imprimindo "+rows.length+" etiqueta(s) em "+accountName(slots.get(slot))+"...","info");
         const response=await callAccount(slot,"print_orders",{
-          orderIds:rows.map(o=>o.idStr),
+          orderRefs:rows.map(o=>({
+            idStr:o.idStr||"",
+            authIdStr:o.authIdStr||"",
+            orderNo:o.orderNo||""
+          })),
           label:label||rows[0]?.sku||rows[0]?.orderNo||"Checkout Multi",
           printer:selectedPrinter,
           allowCustomerMessages
