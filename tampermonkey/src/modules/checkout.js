@@ -2943,18 +2943,27 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function refreshAgent() {
+    // NUNCA reinicia o WebSocket enquanto existe impressão em andamento.
+    // O printMany depende de receber o printProcess pelo MESMO socket que enviou o lote.
+    // Fechar/reabrir o socket aqui fazia kit/múltiplos ficarem presos em
+    // "Enviando etiqueta(s) ao plugin oficial..." depois de concluir a bipagem.
+    if (state.loading || state.activePrintJob) return;
+
     const wasOnline = state.agentOnline;
     const wasStatus = state.pluginStatus;
     try {
-      await connectPrintPlugin(true);
-      if (pluginSocket?.readyState === WebSocket.OPEN) pluginSend('getPrinter', null);
+      if (pluginSocket?.readyState === WebSocket.OPEN) {
+        pluginSend('getPrinter', null);
+      } else {
+        await connectPrintPlugin(false);
+        if (pluginSocket?.readyState === WebSocket.OPEN) pluginSend('getPrinter', null);
+      }
     } catch (error) {
       state.agentOnline = false;
       state.pluginStatus = 'desconectado';
       console.warn('[KZ Checkout] plugin:', error);
     }
-    // Roda a cada 20s (agentTimer); só re-renderiza o painel inteiro se o status
-    // realmente mudou, senão vira mais uma fonte de reset de scroll periódico.
+    // Só re-renderiza se o estado real do plugin mudou.
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
@@ -2981,7 +2990,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        addSystemLog('plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
         resolve({
           ok: false,
           timedOut: true,
@@ -3397,7 +3406,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
         const unknownSet = new Set(unknownIds);
         state.orders = state.orders.filter(order => !unknownSet.has(norm(order.idStr)));
-        addSystemLog('impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
+        appLog('warn', 'impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
         scheduleRender();
       }
 
