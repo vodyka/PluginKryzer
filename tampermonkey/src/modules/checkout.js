@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.5';
+  const VERSION = '0.5.0.6';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -125,6 +125,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   let warehouseRegistry = [];
   let warehouseRegistryAt = 0;
   const skuDetailCache = new Map();
+  let printMarkChain = Promise.resolve();
 
   function readJson(key, fallback) {
     try {
@@ -2159,7 +2160,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       return value;
     });
 
-    const blockedPrintedIds = new Set([...(state.pending?.orderIds || []), ...(state.unknownPrint?.orderIds || [])].map(norm));
+    const blockedPrintedIds = new Set([...(state.pending?.orderIds || [])].map(norm));
     state.orders = normalized.filter(order => order.idStr && !blockedPrintedIds.has(norm(order.idStr)));
     if (!silent) setMessage('Carregando códigos de barras e GTIN dos SKUs...', 'info');
     await enrichOrdersWithSkuScanInfo(state.orders);
@@ -2883,13 +2884,13 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     if (!job.markQueued) job.markQueued = new Set();
     if (!job.marked) job.marked = new Set();
     if (!job.markFailed) job.markFailed = new Set();
-    if (!job.markChain) job.markChain = Promise.resolve();
 
     job.markQueued.add(id);
     addPendingPrintedId(id);
 
-    // Fila estritamente sequencial: marca A, depois B, depois C...
-    job.markChain = job.markChain.then(async () => {
+    // Fila global e estritamente sequencial: marca A, depois B, depois C,
+    // inclusive se o operador já iniciou o próximo SKU.
+    printMarkChain = printMarkChain.then(async () => {
       const ok = await markPrintedOrderImmediately(id);
       if (ok) job.marked.add(id);
       else job.markFailed.add(id);
@@ -2911,7 +2912,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       if (!job.expected.has(id)) return;
       const firstConfirmation = !job.success.has(id);
       job.success.set(id, row);
-      if (firstConfirmation) queueImmediatePrintedMark(job, id);
+      if (firstConfirmation && job.autoMark !== false) queueImmediatePrintedMark(job, id);
     });
     errorRows.forEach(row => {
       const id = norm(row.orderIdStr || row.orderId);
@@ -3052,7 +3053,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
-  async function printOrdersWithPlugin(orders, timeoutMs = 60000) {
+  async function printOrdersWithPlugin(orders, timeoutMs = 60000, options = {}) {
     if (!orders.length) return { ok: true, success: [], errors: [] };
     await connectPrintPlugin(false);
     if (!state.printer) throw new Error('Selecione uma impressora.');
@@ -3070,7 +3071,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         markQueued: new Set(),
         marked: new Set(),
         markFailed: new Set(),
-        markChain: Promise.resolve(),
+        autoMark: options.autoMark !== false,
         resolve,
         reject,
         timeout: null,
@@ -3365,7 +3366,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         authIdStr: entry.authIdStr,
         trackingNumber: entry.trackingNumber,
       };
-      const result = await printOrdersWithPlugin([order]);
+      const result = await printOrdersWithPlugin([order], 60000, { autoMark: false });
       if (!result.success.length) throw new Error(result.errors[0]?.detail?.errorMsg || 'O plugin não confirmou a reimpressão.');
       entry.reprints = Number(entry.reprints || 0) + 1;
       entry.lastReprintedAt = new Date().toISOString();
