@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.3';
+  const VERSION = '0.5.0.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -2943,154 +2943,23 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function refreshAgent() {
-    // NUNCA reinicia o WebSocket enquanto existe impressão em andamento.
-    // O printMany depende de receber o printProcess pelo MESMO socket que enviou o lote.
-    // Fechar/reabrir o socket aqui fazia kit/múltiplos ficarem presos em
-    // "Enviando etiqueta(s) ao plugin oficial..." depois de concluir a bipagem.
-    if (state.loading || state.activePrintJob) return;
-
     const wasOnline = state.agentOnline;
     const wasStatus = state.pluginStatus;
     try {
-      if (pluginSocket?.readyState === WebSocket.OPEN) {
-        pluginSend('getPrinter', null);
-      } else {
-        await connectPrintPlugin(false);
-        if (pluginSocket?.readyState === WebSocket.OPEN) pluginSend('getPrinter', null);
-      }
+      await connectPrintPlugin(true);
+      if (pluginSocket?.readyState === WebSocket.OPEN) pluginSend('getPrinter', null);
     } catch (error) {
       state.agentOnline = false;
       state.pluginStatus = 'desconectado';
       console.warn('[KZ Checkout] plugin:', error);
     }
-    // Só re-renderiza se o estado real do plugin mudou.
+    // Roda a cada 20s (agentTimer); só re-renderiza o painel inteiro se o status
+    // realmente mudou, senão vira mais uma fonte de reset de scroll periódico.
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
-  async function checkPluginPrintCompleted(orderId) {
-    const id = norm(orderId);
-    if (!id) return { ok: false, json: null };
-
-    try {
-      const response = await fetch(`/api/order/check-print?id=${encodeURIComponent(id)}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { 'x-requested-with': 'XMLHttpRequest' },
-      });
-      let json = null;
-      try { json = await response.json(); }
-      catch { return { ok: false, json: null }; }
-
-      const data = json?.data;
-      const statusText = norm(
-        data?.status || data?.printStatus || data?.state ||
-        json?.status || json?.message || json?.msg
-      ).toLowerCase();
-
-      const explicitDone =
-        data === true ||
-        data?.printed === true ||
-        Number(data?.printCount || 0) > 0 ||
-        Number(data?.printStatus) === 1 ||
-        ['success','done','printed','complete','completed'].includes(statusText);
-
-      // Nesta API, resposta de sucesso sem um estado negativo significa que o
-      // UpSeller aceitou a confirmação de impressão do pedido.
-      const explicitNotDone =
-        data === false ||
-        Number(data?.printStatus) === 0 ||
-        ['fail','failed','pending','processing','unprinted','not_printed'].includes(statusText);
-
-      const ok = response.ok && !explicitNotDone && (explicitDone || isSuccess(json));
-      appLog(ok ? 'info' : 'warn', 'plugin_check_print_fallback', {
-        orderId: id,
-        httpStatus: response.status,
-        ok,
-        code: json?.code ?? json?.status ?? null,
-        message: json?.msg || json?.message || '',
-      });
-      return { ok, json };
-    } catch (error) {
-      appLog('warn', 'plugin_check_print_fallback_falhou', {
-        orderId: id,
-        error: error?.message || String(error),
-      });
-      return { ok: false, json: null };
-    }
-  }
-
-  function runPluginPrintJob(ids, timeoutMs = 25000) {
-    const cleanIds = [...new Set((ids || []).map(norm).filter(Boolean))];
-    if (!cleanIds.length) return Promise.resolve({ ok: true, success: [], errors: [], unknownIds: [] });
-    if (state.activePrintJob) return Promise.reject(new Error('Já existe uma impressão em andamento.'));
-
-    return new Promise((resolve, reject) => {
-      const job = {
-        expected: new Set(cleanIds),
-        success: new Map(),
-        errors: new Map(),
-        resolve,
-        reject,
-        timeout: null,
-      };
-
-      // O plugin às vezes imprime fisicamente mas perde o evento printProcess.
-      // Antes de declarar timeout, pergunta ao próprio UpSeller se o pedido foi
-      // finalizado na impressão. Se sim, converte em sucesso e o fluxo segue para
-      // /api/order/mark-print normalmente.
-      job.timeout = setTimeout(async () => {
-        if (state.activePrintJob !== job) return;
-
-        const unresolved = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        for (const id of unresolved) {
-          const checked = await checkPluginPrintCompleted(id);
-          if (checked.ok) {
-            job.success.set(id, {
-              orderIdStr: id,
-              fallback: 'check-print',
-              checkedAt: new Date().toISOString(),
-            });
-          }
-        }
-
-        if (state.activePrintJob !== job) return;
-        state.activePrintJob = null;
-
-        const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        try {
-          appLog(unknownIds.length ? 'warn' : 'info', 'plugin_timeout_parcial', {
-            confirmados: job.success.size,
-            erros: job.errors.size,
-            desconhecidos: unknownIds,
-            total: job.expected.size,
-            recoveredByCheckPrint: job.success.size > 0,
-          });
-        } catch {}
-
-        resolve({
-          ok: job.errors.size === 0 && unknownIds.length === 0,
-          timedOut: true,
-          success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
-          errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
-          unknownIds,
-        });
-      }, timeoutMs);
-
-      state.activePrintJob = job;
-      try {
-        // O protocolo oficial do plugin usa params: [[idStr1,idStr2,...]].
-        // Para evitar o travamento observado em lotes, enviamos um pedido por vez.
-        pluginSend('printMany', [cleanIds]);
-      } catch (error) {
-        clearTimeout(job.timeout);
-        state.activePrintJob = null;
-        reject(error);
-      }
-    });
-  }
-
   async function printOrdersWithPlugin(orders, timeoutMs = 60000) {
-    if (!orders.length) return { ok: true, success: [], errors: [], unknownIds: [] };
+    if (!orders.length) return { ok: true, success: [], errors: [] };
     await connectPrintPlugin(false);
     if (!state.printer) throw new Error('Selecione uma impressora.');
     if (state.activePrintJob) throw new Error('Já existe uma impressão em andamento.');
@@ -3098,51 +2967,38 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     pluginSend('changePrinter', [state.printer]);
     await new Promise(resolve => setTimeout(resolve, 120));
 
-    const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
-    if (!ids.length) return { ok: true, success: [], errors: [], unknownIds: [] };
-
-    // 1 pedido mantém exatamente o fluxo unitário.
-    if (ids.length === 1) {
-      return await runPluginPrintJob(ids, timeoutMs);
-    }
-
-    // Lote: o Print Plugin tem apresentado travamento intermitente quando recebe
-    // vários IDs de uma vez. Enviar sequencialmente preserva a impressão em massa
-    // para o operador, mas cada printMany contém somente 1 pedido — o caminho que
-    // já é estável na impressão unitária.
-    const success = [];
-    const errors = [];
-    const unknownIds = [];
-    const perOrderTimeout = Math.min(30000, Math.max(15000, Math.floor(timeoutMs / 2)));
-
-    for (let index = 0; index < ids.length; index++) {
-      const id = ids[index];
-      setMessage(`Enviando etiqueta ${index + 1}/${ids.length} ao plugin oficial...`, 'info');
-
-      let result;
+    return await new Promise((resolve, reject) => {
+      const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
+      const job = {
+        expected: new Set(ids),
+        success: new Map(),
+        errors: new Map(),
+        resolve,
+        reject,
+        timeout: null,
+      };
+      job.timeout = setTimeout(() => {
+        if (state.activePrintJob !== job) return;
+        state.activePrintJob = null;
+        const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
+        addSystemLog('plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        resolve({
+          ok: false,
+          timedOut: true,
+          success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
+          errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
+          unknownIds,
+        });
+      }, timeoutMs);
+      state.activePrintJob = job;
       try {
-        result = await runPluginPrintJob([id], perOrderTimeout);
+        pluginSend('printMany', [ids]);
       } catch (error) {
-        errors.push({ orderId: id, detail: { message: error?.message || String(error) } });
-        continue;
+        clearTimeout(job.timeout);
+        state.activePrintJob = null;
+        reject(error);
       }
-
-      success.push(...(result.success || []));
-      errors.push(...(result.errors || []));
-      if (Array.isArray(result.unknownIds)) unknownIds.push(...result.unknownIds);
-
-      // Pequeno respiro entre comandos para o plugin/printer concluir a fila local.
-      if (index < ids.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 120));
-      }
-    }
-
-    return {
-      ok: errors.length === 0 && unknownIds.length === 0 && success.length === ids.length,
-      success,
-      errors,
-      unknownIds: [...new Set(unknownIds.map(norm).filter(Boolean))],
-    };
+    });
   }
 
   async function postForm(url, params) {
@@ -3541,7 +3397,7 @@ Isso NÃO chama mark-print novamente.`)) return;
         saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
         const unknownSet = new Set(unknownIds);
         state.orders = state.orders.filter(order => !unknownSet.has(norm(order.idStr)));
-        appLog('warn', 'impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
+        addSystemLog('impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
         scheduleRender();
       }
 
