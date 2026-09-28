@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.1';
+  const VERSION = '0.5.0.5';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -32,8 +32,10 @@ function initCheckoutModule() {
   const STORAGE_PENDING = 'kz_quick_checkout_pending_mark_v1';
   const STORAGE_UNKNOWN_PRINT = 'kz_quick_checkout_unknown_print_v1';
   const STORAGE_STUCK_VOIDED = 'kz_quick_checkout_stuck_voided_v1';
-  // Remove o marcador antigo de impressão interrompida, que causava aviso falso e devolvia pedidos já impressos à fila.
+  // Remove marcadores antigos que exigiam decisão manual "etiqueta saiu / não saiu".
+  // A confirmação agora acontece automaticamente por pedido conforme printSuccess chega.
   localStorage.removeItem('kz_quick_checkout_print_inflight_v1');
+  localStorage.removeItem(STORAGE_UNKNOWN_PRINT);
   const STORAGE_FILTERS = 'kz_quick_checkout_filters_v1';
   const STORAGE_LOGS = 'kz_quick_checkout_system_logs_v1';
   const MAX_SYSTEM_LOGS = 500;
@@ -44,6 +46,7 @@ function initCheckoutModule() {
   const STORAGE_SKU_FILTERS = 'kz_quick_checkout_sku_filters_v1';
   const STORAGE_WAREHOUSE_ALIASES = 'kz_quick_checkout_warehouse_aliases_v1';
 const STORAGE_BULK_MASS_PRINT = 'kz_quick_checkout_bulk_mass_v1';
+const STORAGE_SINGLE_BULK_PRINT = 'kz_quick_checkout_single_bulk_mass_v1';
 const STORAGE_QTY_SCAN_CONFIRM = 'kz_quick_checkout_qty_scan_confirm_v1';
 const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
 
@@ -88,7 +91,7 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     message: 'Aguardando os pedidos para checkout...',
     messageType: 'info',
     pending: readJson(STORAGE_PENDING, null),
-    unknownPrint: readJson(STORAGE_UNKNOWN_PRINT, null),
+    unknownPrint: null,
     stuckVoidedOrders: readJson(STORAGE_STUCK_VOIDED, []),
     filters: readJson(STORAGE_FILTERS, { channelSelection: {}, warehouses: [], onlyToday: false, priorityFirst: true }),
     systemLogs: readJson(STORAGE_LOGS, []),
@@ -104,6 +107,7 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     expandedMultipleId: '',
     warehouseAliases: readJson(STORAGE_WAREHOUSE_ALIASES, {}),
 bulkMassPrintEnabled: readJson(STORAGE_BULK_MASS_PRINT, true) !== false,
+singleBulkMassPrintEnabled: readJson(STORAGE_SINGLE_BULK_PRINT, true) !== false,
 qtyScanConfirmEnabled: readJson(STORAGE_QTY_SCAN_CONFIRM, false) === true,
 stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   };
@@ -2575,7 +2579,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   function pendingOrderIdSet() {
-    return new Set([...(state.pending?.orderIds || []), ...(state.unknownPrint?.orderIds || [])].map(norm));
+    return new Set([...(state.pending?.orderIds || [])].map(norm));
   }
 
   // Modelo de filtro por marketplace: state.filters.channelSelection é um objeto
@@ -2808,6 +2812,93 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     catch { return null; }
   }
 
+  function addPendingPrintedId(orderId) {
+    const id = norm(orderId);
+    if (!id) return;
+    const current = new Set((state.pending?.orderIds || []).map(norm).filter(Boolean));
+    current.add(id);
+    state.pending = {
+      sku: state.pending?.sku || 'IMPRESSAO',
+      printer: state.printer,
+      orderIds: [...current],
+      createdAt: state.pending?.createdAt || new Date().toISOString(),
+    };
+    saveJson(STORAGE_PENDING, state.pending);
+
+    // printSuccess = confirmação do plugin de que esta etiqueta foi processada.
+    // Some localmente da fila imediatamente para não poder ser bipada de novo
+    // enquanto o mark-print roda em segundo plano.
+    state.orders = state.orders.filter(order => norm(order.idStr) !== id);
+    scheduleRender();
+  }
+
+  function removePendingPrintedId(orderId) {
+    const id = norm(orderId);
+    if (!id || !state.pending?.orderIds?.length) return;
+    const remaining = state.pending.orderIds.map(norm).filter(value => value && value !== id);
+    if (remaining.length) {
+      state.pending.orderIds = remaining;
+      saveJson(STORAGE_PENDING, state.pending);
+    } else {
+      state.pending = null;
+      localStorage.removeItem(STORAGE_PENDING);
+    }
+    scheduleRender();
+  }
+
+  async function markPrintedOrderImmediately(orderId) {
+    const id = norm(orderId);
+    if (!id) return false;
+
+    const waits = [0, 350, 900];
+    for (let attempt = 0; attempt < waits.length; attempt++) {
+      if (waits[attempt]) await new Promise(resolve => setTimeout(resolve, waits[attempt]));
+      try {
+        const result = await markOrders([id]);
+        if (result.ok) {
+          removePendingPrintedId(id);
+          appLog('info', 'mark_print_individual_ok', { orderId: id, tentativa: attempt + 1 });
+          postBridge('REFRESH_ORDER_INDEX');
+          return true;
+        }
+      } catch (error) {
+        appLog('warn', 'mark_print_individual_falhou', {
+          orderId: id,
+          tentativa: attempt + 1,
+          erro: error?.message || String(error),
+        });
+      }
+    }
+
+    // Mantém em pending para o retry automático/manual existente, mas não trava
+    // o job de impressão nem o scanner.
+    appLog('error', 'mark_print_individual_pendente', { orderId: id });
+    scheduleRender();
+    return false;
+  }
+
+  function queueImmediatePrintedMark(job, orderId) {
+    const id = norm(orderId);
+    if (!id || !job || job.markQueued?.has(id)) return;
+    if (!job.markQueued) job.markQueued = new Set();
+    if (!job.marked) job.marked = new Set();
+    if (!job.markFailed) job.markFailed = new Set();
+    if (!job.markChain) job.markChain = Promise.resolve();
+
+    job.markQueued.add(id);
+    addPendingPrintedId(id);
+
+    // Fila estritamente sequencial: marca A, depois B, depois C...
+    job.markChain = job.markChain.then(async () => {
+      const ok = await markPrintedOrderImmediately(id);
+      if (ok) job.marked.add(id);
+      else job.markFailed.add(id);
+    }).catch(error => {
+      job.markFailed.add(id);
+      appLog('error', 'fila_mark_print_erro', { orderId: id, erro: error?.message || String(error) });
+    });
+  }
+
   function handlePluginPrintProcess(message) {
     const job = state.activePrintJob;
     if (!job || message?.method !== 'printProcess') return;
@@ -2817,7 +2908,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
     successRows.forEach(row => {
       const id = norm(row.orderIdStr || row.orderId);
-      if (job.expected.has(id)) job.success.set(id, row);
+      if (!job.expected.has(id)) return;
+      const firstConfirmation = !job.success.has(id);
+      job.success.set(id, row);
+      if (firstConfirmation) queueImmediatePrintedMark(job, id);
     });
     errorRows.forEach(row => {
       const id = norm(row.orderIdStr || row.orderId);
@@ -2973,6 +3067,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         expected: new Set(ids),
         success: new Map(),
         errors: new Map(),
+        markQueued: new Set(),
+        marked: new Set(),
+        markFailed: new Set(),
+        markChain: Promise.resolve(),
         resolve,
         reject,
         timeout: null,
@@ -2981,7 +3079,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        addSystemLog('plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
         resolve({
           ok: false,
           timedOut: true,
@@ -3386,56 +3484,25 @@ Isso NÃO chama mark-print novamente.`)) return;
       }
 
       if (unknownIds.length) {
-        const unknownOrders = selectedOrders.filter(order => unknownIds.includes(norm(order.idStr)));
-        state.unknownPrint = {
+        // Sem confirmação do plugin = não toma decisão pelo operador.
+        // Esses pedidos permanecem na fila normalmente. Os que vieram em
+        // printSuccess já foram retirados localmente e estão sendo marcados
+        // individualmente em segundo plano.
+        appLog('warn', 'impressao_sem_confirmacao', {
           sku: displayLabel,
-          printer: state.printer,
-          orderIds: [...unknownIds],
-          orderNos: unknownOrders.map(order => order.orderNo || order.idStr),
-          createdAt: now,
-        };
-        saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
-        const unknownSet = new Set(unknownIds);
-        state.orders = state.orders.filter(order => !unknownSet.has(norm(order.idStr)));
-        addSystemLog('impressao_resultado_desconhecido', { sku: displayLabel, pedidos: state.unknownPrint.orderNos, ids: unknownIds });
-        scheduleRender();
-      }
-
-      if (successIds.length) {
-        state.pending = {
-          sku: displayLabel,
-          printer: state.printer,
-          orderIds: [...successIds],
-          createdAt: now,
-        };
-        saveJson(STORAGE_PENDING, state.pending);
-        // Assim que o plugin confirma a impressão, o pedido sai localmente da fila.
-        // Isso evita imprimir duas vezes enquanto o UpSeller ainda processa a marcação.
-        const printedSet = new Set(successIds.map(norm));
-        state.orders = state.orders.filter(order => !printedSet.has(norm(order.idStr)));
-        scheduleRender();
-
-        setMessage(`Plugin confirmou ${successIds.length}/${selectedOrders.length}. Confirmando a marcação no UpSeller...`, 'info');
-        const marked = await markOrdersReliably(successIds);
-        const markedIds = successIds.filter(id => !marked.failedIds.includes(id));
-        if (marked.ok) {
-          state.pending = null;
-          localStorage.removeItem(STORAGE_PENDING);
-        } else {
-          state.pending.orderIds = marked.failedIds;
-          saveJson(STORAGE_PENDING, state.pending);
-        }
+          ids: unknownIds,
+          confirmados: successIds.length,
+          total: selectedOrders.length,
+        });
       }
 
       if (unknownIds.length) {
-        setMessage(`⚠ ${unknownIds.length} etiqueta(s) sem confirmação do plugin. O campo foi liberado, mas esses pedidos ficaram bloqueados para evitar duplicidade. Confira a impressora.`, 'error');
+        setMessage(`✓ ${successIds.length} confirmada(s). ${unknownIds.length} pedido(s) sem retorno do plugin permaneceram na fila. Marcações confirmadas seguem em segundo plano.`, successIds.length ? 'warn' : 'error');
       } else if (failedIds.length) {
         const failedOrders = selectedOrders.filter(order => failedIds.includes(norm(order.idStr))).map(order => order.orderNo || order.idStr);
-        setMessage(`✓ ${successIds.length} impressa(s). ✗ ${failedIds.length} falhou(aram): ${failedOrders.join(', ')}. Use a lista para tentar novamente.`, 'error');
-      } else if (state.pending?.orderIds?.length) {
-        setMessage(`As ${successIds.length} etiquetas saíram, mas ${state.pending.orderIds.length} marcação(ões) ficaram pendentes.`, 'error');
+        setMessage(`✓ ${successIds.length} confirmada(s). ✗ ${failedIds.length} falhou(aram): ${failedOrders.join(', ')}. Marcações seguem em segundo plano.`, 'error');
       } else {
-        setMessage(`✓ ${successIds.length} etiqueta(s) impressa(s) e marcada(s).`, 'success');
+        setMessage(`✓ ${successIds.length} etiqueta(s) confirmada(s). Marcando os pedidos no UpSeller em segundo plano.`, 'success');
       }
 
       postBridge('REFRESH_ORDER_INDEX');
@@ -3886,7 +3953,12 @@ Isso NÃO chama mark-print novamente.`)) return;
         return;
       }
       const printableGroup = shortage > 0 ? { ...group, orders: group.orders.slice(0, printable) } : group;
-      if (printableGroup.orders.length === 1 && shortage === 0) {
+
+      if (!state.singleBulkMassPrintEnabled) {
+        const oneOrderGroup = { ...printableGroup, orders: printableGroup.orders.slice(0, 1) };
+        setMessage(`SKU ${sku} encontrado. Impressão em massa de Pedido Único desligada: imprimindo somente 1 pedido...`, 'success');
+        executePrint(oneOrderGroup, 1);
+      } else if (printableGroup.orders.length === 1 && shortage === 0) {
         setMessage(`SKU ${sku} encontrado em 1 pedido. Imprimindo diretamente...`, 'success');
         executePrint(printableGroup, 1);
       } else {
@@ -4493,7 +4565,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     const plAvailableCount=state.activePickList?pickListAvailableOrders().length:0;
     const plTotalCount=state.activePickList?(Number(state.activePickList.orderCount||0)||plAvailableCount):0;
     const plOutsideCount=Math.max(0,plTotalCount-plAvailableCount);
-    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Múltiplos Itens</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Agrupar kits repetidos','Quando ligado, agrupa pedidos de kit idênticos e oferece imprimir tudo junto.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">${state.activePickList?`Origem: ${escapeHtml(state.activePickList.pickListNo)}`:'Origem: Etiqueta não impressa'}</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.unknownPrint?.orderIds?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.unknownPrint.orderIds.length} pedido(s) com impressão sem confirmação</b><br>A etiqueta pode ter saído. Confira fisicamente antes de escolher.<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px"><button id="kzqc-unknown-mark">A etiqueta saiu — marcar</button><button id="kzqc-unknown-release" style="background:#64748b">A etiqueta não saiu — liberar</button></div></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters ${state.activePickList?'kzqc-hidden':''}"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
+    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Impressão em massa</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Impressão em massa de pedido kit','Quando ligado, pedidos de kit/múltiplos com composição idêntica podem ser impressos juntos.')}${switchToggleHtml('kzqc-single-bulk-toggle',state.singleBulkMassPrintEnabled,'Impressão em massa de pedido único','Quando desligado, bipar um SKU de Item Único imprime somente 1 pedido por vez, sem abrir o popup de quantidade.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">${state.activePickList?`Origem: ${escapeHtml(state.activePickList.pickListNo)}`:'Origem: Etiqueta não impressa'}</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters ${state.activePickList?'kzqc-hidden':''}"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
     const analysisWarning=panel.querySelector('#kzqc-analysis-warning');
     if(analysisWarning){
       analysisWarning.ondblclick=async()=>{
@@ -4504,8 +4576,6 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
         scheduleRender();
       };
     }
-    panel.querySelector('#kzqc-unknown-mark')?.addEventListener('click',()=>resolveUnknownPrint('mark'));
-    panel.querySelector('#kzqc-unknown-release')?.addEventListener('click',()=>resolveUnknownPrint('release'));
     panel.querySelector('#kzqc-retry-stuck-voided')?.addEventListener('click',retryStuckVoided);
     const channelSection=[...panel.querySelectorAll('.kzqc-sidebar-section')].find(section=>section.querySelector('.kzqc-section-title')?.textContent.trim()==='Canais');
     if(channelSection && !state.activePickList){
@@ -4581,7 +4651,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       renderPanel();
       setTimeout(focusScanner,30);
     }));
-    panel.querySelector('#kzqc-today-filter')?.addEventListener('click',()=>{state.filters.onlyToday=!state.filters.onlyToday;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-priority-filter')?.addEventListener('click',()=>{state.filters.priorityFirst=state.filters.priorityFirst===false;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-bulk-toggle')?.addEventListener('change',e=>{state.bulkMassPrintEnabled=e.target.checked;saveJson(STORAGE_BULK_MASS_PRINT,state.bulkMassPrintEnabled);renderPanel()});
+    panel.querySelector('#kzqc-today-filter')?.addEventListener('click',()=>{state.filters.onlyToday=!state.filters.onlyToday;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-priority-filter')?.addEventListener('click',()=>{state.filters.priorityFirst=state.filters.priorityFirst===false;saveJson(STORAGE_FILTERS,state.filters);renderPanel()}); panel.querySelector('#kzqc-bulk-toggle')?.addEventListener('change',e=>{state.bulkMassPrintEnabled=e.target.checked;saveJson(STORAGE_BULK_MASS_PRINT,state.bulkMassPrintEnabled);renderPanel()}); panel.querySelector('#kzqc-single-bulk-toggle')?.addEventListener('change',e=>{state.singleBulkMassPrintEnabled=e.target.checked;saveJson(STORAGE_SINGLE_BULK_PRINT,state.singleBulkMassPrintEnabled);renderPanel();setTimeout(focusScanner,30)});
     panel.querySelectorAll('.kzqc-tab').forEach(b=>b.onclick=()=>{if(state.checkoutSession||state.loading)return;state.activeTab=b.dataset.tab;saveJson(STORAGE_UI,{minimized:state.minimized,activeTab:state.activeTab});renderPanel();focusScanner()});
     panel.querySelectorAll('.kzqc-row').forEach(row=>{
       const order=findOrderById(row.dataset.orderId);
