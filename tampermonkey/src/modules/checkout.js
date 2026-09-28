@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.2';
+  const VERSION = '0.5.0.3';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -2967,6 +2967,58 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
+  async function checkPluginPrintCompleted(orderId) {
+    const id = norm(orderId);
+    if (!id) return { ok: false, json: null };
+
+    try {
+      const response = await fetch(`/api/order/check-print?id=${encodeURIComponent(id)}`, {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'x-requested-with': 'XMLHttpRequest' },
+      });
+      let json = null;
+      try { json = await response.json(); }
+      catch { return { ok: false, json: null }; }
+
+      const data = json?.data;
+      const statusText = norm(
+        data?.status || data?.printStatus || data?.state ||
+        json?.status || json?.message || json?.msg
+      ).toLowerCase();
+
+      const explicitDone =
+        data === true ||
+        data?.printed === true ||
+        Number(data?.printCount || 0) > 0 ||
+        Number(data?.printStatus) === 1 ||
+        ['success','done','printed','complete','completed'].includes(statusText);
+
+      // Nesta API, resposta de sucesso sem um estado negativo significa que o
+      // UpSeller aceitou a confirmação de impressão do pedido.
+      const explicitNotDone =
+        data === false ||
+        Number(data?.printStatus) === 0 ||
+        ['fail','failed','pending','processing','unprinted','not_printed'].includes(statusText);
+
+      const ok = response.ok && !explicitNotDone && (explicitDone || isSuccess(json));
+      appLog(ok ? 'info' : 'warn', 'plugin_check_print_fallback', {
+        orderId: id,
+        httpStatus: response.status,
+        ok,
+        code: json?.code ?? json?.status ?? null,
+        message: json?.msg || json?.message || '',
+      });
+      return { ok, json };
+    } catch (error) {
+      appLog('warn', 'plugin_check_print_fallback_falhou', {
+        orderId: id,
+        error: error?.message || String(error),
+      });
+      return { ok: false, json: null };
+    }
+  }
+
   function runPluginPrintJob(ids, timeoutMs = 25000) {
     const cleanIds = [...new Set((ids || []).map(norm).filter(Boolean))];
     if (!cleanIds.length) return Promise.resolve({ ok: true, success: [], errors: [], unknownIds: [] });
@@ -2982,20 +3034,41 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         timeout: null,
       };
 
-      job.timeout = setTimeout(() => {
+      // O plugin às vezes imprime fisicamente mas perde o evento printProcess.
+      // Antes de declarar timeout, pergunta ao próprio UpSeller se o pedido foi
+      // finalizado na impressão. Se sim, converte em sucesso e o fluxo segue para
+      // /api/order/mark-print normalmente.
+      job.timeout = setTimeout(async () => {
+        if (state.activePrintJob !== job) return;
+
+        const unresolved = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
+        for (const id of unresolved) {
+          const checked = await checkPluginPrintCompleted(id);
+          if (checked.ok) {
+            job.success.set(id, {
+              orderIdStr: id,
+              fallback: 'check-print',
+              checkedAt: new Date().toISOString(),
+            });
+          }
+        }
+
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
+
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
         try {
-          appLog('warn', 'plugin_timeout_parcial', {
+          appLog(unknownIds.length ? 'warn' : 'info', 'plugin_timeout_parcial', {
             confirmados: job.success.size,
             erros: job.errors.size,
             desconhecidos: unknownIds,
             total: job.expected.size,
+            recoveredByCheckPrint: job.success.size > 0,
           });
         } catch {}
+
         resolve({
-          ok: false,
+          ok: job.errors.size === 0 && unknownIds.length === 0,
           timedOut: true,
           success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
           errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
