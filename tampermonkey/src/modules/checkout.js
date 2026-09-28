@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.2';
+  const VERSION = '0.5.0.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -32,10 +32,8 @@ function initCheckoutModule() {
   const STORAGE_PENDING = 'kz_quick_checkout_pending_mark_v1';
   const STORAGE_UNKNOWN_PRINT = 'kz_quick_checkout_unknown_print_v1';
   const STORAGE_STUCK_VOIDED = 'kz_quick_checkout_stuck_voided_v1';
-  // v1 era um marcador antigo. v2 salva o lote completo antes do printMany e
-  // permite recuperar a sessão após F5/travamento sem reimpressão silenciosa.
+  // Remove o marcador antigo de impressão interrompida, que causava aviso falso e devolvia pedidos já impressos à fila.
   localStorage.removeItem('kz_quick_checkout_print_inflight_v1');
-  const STORAGE_PRINT_INFLIGHT = 'kz_quick_checkout_print_inflight_v2';
   const STORAGE_FILTERS = 'kz_quick_checkout_filters_v1';
   const STORAGE_LOGS = 'kz_quick_checkout_system_logs_v1';
   const MAX_SYSTEM_LOGS = 500;
@@ -91,7 +89,6 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     messageType: 'info',
     pending: readJson(STORAGE_PENDING, null),
     unknownPrint: readJson(STORAGE_UNKNOWN_PRINT, null),
-    printInflight: readJson(STORAGE_PRINT_INFLIGHT, null),
     stuckVoidedOrders: readJson(STORAGE_STUCK_VOIDED, []),
     filters: readJson(STORAGE_FILTERS, { channelSelection: {}, warehouses: [], onlyToday: false, priorityFirst: true }),
     systemLogs: readJson(STORAGE_LOGS, []),
@@ -1571,87 +1568,6 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     }
   }
 
-  function savePrintInflight(orders, label = '') {
-    const rows = (orders || []).filter(order => norm(order?.idStr));
-    if (!rows.length) return null;
-    const snapshot = {
-      label: norm(label || rows[0]?.orderNo || 'Lote de impressão'),
-      printer: state.printer || '',
-      orderIds: rows.map(order => norm(order.idStr)),
-      orderNos: rows.map(order => norm(order.orderNo || order.idStr)),
-      startedAt: new Date().toISOString(),
-      status: 'printing',
-    };
-    state.printInflight = snapshot;
-    saveJson(STORAGE_PRINT_INFLIGHT, snapshot);
-    appLog('info', 'impressao_lote_iniciado', {
-      label: snapshot.label,
-      total: snapshot.orderIds.length,
-      pedidos: snapshot.orderNos,
-    });
-    return snapshot;
-  }
-
-  function clearPrintInflight(reason = '') {
-    const snapshot = state.printInflight;
-    state.printInflight = null;
-    localStorage.removeItem(STORAGE_PRINT_INFLIGHT);
-    if (snapshot && reason) {
-      appLog('info', 'impressao_lote_inflight_encerrado', {
-        reason,
-        total: snapshot.orderIds?.length || 0,
-        pedidos: snapshot.orderNos || [],
-      });
-    }
-  }
-
-  function recoverInterruptedPrintIfNeeded() {
-    const inflight = state.printInflight;
-    const ids = [...new Set((inflight?.orderIds || []).map(norm).filter(Boolean))];
-    if (!ids.length) {
-      if (state.printInflight) clearPrintInflight('registro_vazio');
-      return false;
-    }
-
-    // IDs já persistidos em pending/unknown estão protegidos. Só convertemos
-    // para "resultado desconhecido" o que ficou realmente sem estado após F5.
-    const protectedIds = new Set([
-      ...(state.pending?.orderIds || []),
-      ...(state.unknownPrint?.orderIds || []),
-    ].map(norm).filter(Boolean));
-    const unresolvedIds = ids.filter(id => !protectedIds.has(id));
-
-    if (!unresolvedIds.length) {
-      clearPrintInflight('recuperacao_ja_protegida');
-      return false;
-    }
-
-    const existing = state.unknownPrint;
-    const unresolvedSet = new Set(unresolvedIds);
-    const inflightNos = (inflight?.orderNos || []).filter((_, index) => unresolvedSet.has(ids[index]));
-    const mergedIds = [...new Set([...(existing?.orderIds || []), ...unresolvedIds].map(norm).filter(Boolean))];
-    const mergedNos = [...new Set([...(existing?.orderNos || []), ...inflightNos].map(norm).filter(Boolean))];
-
-    state.unknownPrint = {
-      sku: existing?.sku || inflight?.label || 'Impressão interrompida',
-      printer: existing?.printer || inflight?.printer || state.printer || '',
-      orderIds: mergedIds,
-      orderNos: mergedNos,
-      createdAt: existing?.createdAt || inflight?.startedAt || new Date().toISOString(),
-      recoveredFromInflight: true,
-    };
-    saveJson(STORAGE_UNKNOWN_PRINT, state.unknownPrint);
-    appLog('warn', 'impressao_interrompida_recuperada', {
-      total: unresolvedIds.length,
-      pedidos: inflightNos.length ? inflightNos : unresolvedIds,
-      startedAt: inflight?.startedAt || '',
-    });
-    state.printInflight = null;
-    localStorage.removeItem(STORAGE_PRINT_INFLIGHT);
-    state.message = '⚠ Uma impressão de ' + unresolvedIds.length + ' etiqueta(s) ficou sem confirmação. Confira fisicamente antes de marcar ou liberar os pedidos.';
-    state.messageType = 'error';
-    return true;
-  }
   function systemLogsText() {
     return (state.systemLogs || []).map(row => {
       let details = '';
@@ -3065,28 +2981,14 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        const result = {
+        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        resolve({
           ok: false,
           timedOut: true,
           success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
           errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
           unknownIds,
-        };
-
-        // Libera a Promise ANTES de log/UI. Um erro secundário jamais pode
-        // deixar state.loading preso depois de as etiquetas saírem.
-        resolve(result);
-
-        try {
-          appLog('warn', 'plugin_timeout_parcial', {
-            confirmados: job.success.size,
-            erros: job.errors.size,
-            desconhecidos: unknownIds,
-            total: job.expected.size,
-          });
-        } catch (error) {
-          console.warn('[KZ Checkout] falha ao registrar timeout do plugin:', error);
-        }
+        });
       }, timeoutMs);
       state.activePrintJob = job;
       try {
@@ -3444,19 +3346,11 @@ Isso NÃO chama mark-print novamente.`)) return;
     const selectedOrders = group.orders.slice(0, qty);
     const displayLabel = group.label || group.sku || selectedOrders[0]?.orderNo || 'pedido';
     state.loading = true;
-    savePrintInflight(selectedOrders, displayLabel);
     setMessage(`Enviando ${selectedOrders.length} etiqueta(s) ao plugin oficial...`, 'info');
     scheduleRender();
 
     try {
       const printResult = await printOrdersWithPlugin(selectedOrders);
-      appLog('info', 'plugin_resultado_impressao', {
-        total: selectedOrders.length,
-        confirmados: printResult.success?.length || 0,
-        erros: printResult.errors?.length || 0,
-        desconhecidos: printResult.unknownIds?.length || 0,
-        timedOut: printResult.timedOut === true,
-      });
       const successIds = printResult.success.map(row => row.orderId);
       const failedIds = printResult.errors.map(row => row.orderId);
       const unknownIds = Array.isArray(printResult.unknownIds) ? printResult.unknownIds.map(norm).filter(Boolean) : [];
@@ -3539,10 +3433,6 @@ Isso NÃO chama mark-print novamente.`)) return;
         }
       }
 
-      // O resultado já foi persistido em pending e/ou unknownPrint.
-      // A partir daqui não precisamos mais do marcador de lote em andamento.
-      clearPrintInflight('resultado_persistido');
-
       if (unknownIds.length) {
         setMessage(`⚠ ${unknownIds.length} etiqueta(s) sem confirmação do plugin. O campo foi liberado, mas esses pedidos ficaram bloqueados para evitar duplicidade. Confira a impressora.`, 'error');
       } else if (failedIds.length) {
@@ -3558,10 +3448,6 @@ Isso NÃO chama mark-print novamente.`)) return;
       return successIds.length > 0;
     } catch (error) {
       console.error('[KZ Checkout] impressão:', error);
-      // Se algo interromper o fluxo depois de o lote ter sido preparado, converte
-      // o registro persistente em "resultado desconhecido" para nunca reimprimir
-      // silenciosamente após F5.
-      recoverInterruptedPrintIfNeeded();
       const isTimeout = /Tempo esgotado/i.test(error?.message || '');
       if (isTimeout) {
         // Não sabemos se a etiqueta chegou a sair fisicamente — mantém o marcador de
@@ -4782,8 +4668,6 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
   }
 
   function init() {
-    // Recupera lote interrompido antes da primeira consulta de pedidos.
-    recoverInterruptedPrintIfNeeded();
     installDrag();
     try {
       unsafeWindow.KZCheckoutRapido = {
@@ -4819,101 +4703,6 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
         limparCacheKits() { skuDetailCache.clear(); return requestOrdersRefresh(true); },
         reconectarPlugin() { return refreshAgent(); },
         atualizarPedidosUnificado() { return requestOrdersRefresh(false); },
-        statusUnificado() {
-          return {
-            version: VERSION,
-            agentOnline: state.agentOnline === true,
-            pluginStatus: state.pluginStatus || '',
-            printers: Array.isArray(state.printers) ? [...state.printers] : [],
-            printer: state.printer || '',
-            loading: state.loading === true,
-            refreshing: state.refreshing === true,
-            message: state.message || '',
-            messageType: state.messageType || 'info',
-            pendingCount: state.pending?.orderIds?.length || 0,
-            unknownPrintCount: state.unknownPrint?.orderIds?.length || 0,
-          };
-        },
-        definirImpressoraUnificado(printer) {
-          const value = norm(printer);
-          if (!value) return false;
-          state.printer = value;
-          localStorage.setItem(STORAGE_PRINTER, value);
-          scheduleRender();
-          return true;
-        },
-        async imprimirPedidosUnificado(orderRefs, label = '', allowCustomerMessages = false) {
-          const refs = (orderRefs || []).map(ref => {
-            if (ref && typeof ref === 'object') {
-              return {
-                idStr: norm(ref.idStr || ref.orderId || ref.id),
-                authIdStr: norm(ref.authIdStr || ref.authId),
-                orderNo: norm(ref.orderNo || ref.orderNumber || ref.platformOrderNo),
-              };
-            }
-            const value = norm(ref);
-            return { idStr: value, authIdStr: '', orderNo: value };
-          }).filter(ref => ref.idStr || ref.authIdStr || ref.orderNo);
-
-          const unique = [];
-          const seen = new Set();
-          for (const ref of refs) {
-            const key = [ref.idStr, ref.authIdStr, ref.orderNo].filter(Boolean).join('|');
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            unique.push(ref);
-          }
-
-          function locate(ref) {
-            return (state.orders || []).find(order =>
-              (ref.idStr && norm(order.idStr) === ref.idStr) ||
-              (ref.authIdStr && norm(order.authIdStr) === ref.authIdStr) ||
-              (ref.orderNo && norm(order.orderNo) === ref.orderNo)
-            ) || null;
-          }
-
-          let orders = unique.map(locate).filter(Boolean);
-
-          // A central Multi trabalha com snapshots. Entre o snapshot e o clique,
-          // a sessão escondida pode ter atualizado state.orders. Reconsulta uma vez
-          // antes de concluir que o pedido sumiu.
-          if (orders.length !== unique.length) {
-            await requestOrdersRefresh(false);
-            orders = unique.map(locate).filter(Boolean);
-          }
-
-          if (!orders.length) {
-            throw new Error('Nenhum pedido disponível para impressão nesta conta após atualizar a sessão.');
-          }
-          if (orders.length !== unique.length) {
-            const found = new Set(orders.flatMap(order => [norm(order.idStr), norm(order.authIdStr), norm(order.orderNo)]).filter(Boolean));
-            const missing = unique.filter(ref =>
-              ![ref.idStr, ref.authIdStr, ref.orderNo].filter(Boolean).some(value => found.has(value))
-            );
-            throw new Error(`Um ou mais pedidos não estão mais disponíveis nesta conta: ${missing.map(ref => ref.orderNo || ref.idStr || ref.authIdStr).join(', ')}`);
-          }
-          const flagged = ordersWithCustomerMessage(orders);
-          if (flagged.length && !allowCustomerMessages) {
-            return {
-              ok: false,
-              needsCustomerMessage: true,
-              messages: flagged.map(order => ({
-                orderId: order.idStr,
-                orderNo: order.orderNo || order.idStr,
-                message: order.msgContent || order.raw?.msgContent || '',
-              })),
-            };
-          }
-          const first = orders[0];
-          const ok = await executePrint({
-            label: norm(label) || (orders.length > 1 ? `${orders.length} pedidos unificados` : (first.orderNo || first.idStr)),
-            sku: first.sku || first.realItems?.[0]?.sku || 'PEDIDO',
-            title: first.title || first.realItems?.[0]?.title || '',
-            image: first.image || first.realItems?.[0]?.image || '',
-            orders,
-          }, orders.length);
-          return { ok: ok === true };
-        },
         snapshotUnificado() {
           return (state.orders || []).map(order => ({
             key: order.key,
