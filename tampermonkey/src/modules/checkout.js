@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.1';
+  const VERSION = '0.5.0.2';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -2967,30 +2967,33 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
-  async function printOrdersWithPlugin(orders, timeoutMs = 60000) {
-    if (!orders.length) return { ok: true, success: [], errors: [] };
-    await connectPrintPlugin(false);
-    if (!state.printer) throw new Error('Selecione uma impressora.');
-    if (state.activePrintJob) throw new Error('Já existe uma impressão em andamento.');
+  function runPluginPrintJob(ids, timeoutMs = 25000) {
+    const cleanIds = [...new Set((ids || []).map(norm).filter(Boolean))];
+    if (!cleanIds.length) return Promise.resolve({ ok: true, success: [], errors: [], unknownIds: [] });
+    if (state.activePrintJob) return Promise.reject(new Error('Já existe uma impressão em andamento.'));
 
-    pluginSend('changePrinter', [state.printer]);
-    await new Promise(resolve => setTimeout(resolve, 120));
-
-    return await new Promise((resolve, reject) => {
-      const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
+    return new Promise((resolve, reject) => {
       const job = {
-        expected: new Set(ids),
+        expected: new Set(cleanIds),
         success: new Map(),
         errors: new Map(),
         resolve,
         reject,
         timeout: null,
       };
+
       job.timeout = setTimeout(() => {
         if (state.activePrintJob !== job) return;
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
-        appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        try {
+          appLog('warn', 'plugin_timeout_parcial', {
+            confirmados: job.success.size,
+            erros: job.errors.size,
+            desconhecidos: unknownIds,
+            total: job.expected.size,
+          });
+        } catch {}
         resolve({
           ok: false,
           timedOut: true,
@@ -2999,15 +3002,74 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
           unknownIds,
         });
       }, timeoutMs);
+
       state.activePrintJob = job;
       try {
-        pluginSend('printMany', [ids]);
+        // O protocolo oficial do plugin usa params: [[idStr1,idStr2,...]].
+        // Para evitar o travamento observado em lotes, enviamos um pedido por vez.
+        pluginSend('printMany', [cleanIds]);
       } catch (error) {
         clearTimeout(job.timeout);
         state.activePrintJob = null;
         reject(error);
       }
     });
+  }
+
+  async function printOrdersWithPlugin(orders, timeoutMs = 60000) {
+    if (!orders.length) return { ok: true, success: [], errors: [], unknownIds: [] };
+    await connectPrintPlugin(false);
+    if (!state.printer) throw new Error('Selecione uma impressora.');
+    if (state.activePrintJob) throw new Error('Já existe uma impressão em andamento.');
+
+    pluginSend('changePrinter', [state.printer]);
+    await new Promise(resolve => setTimeout(resolve, 120));
+
+    const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
+    if (!ids.length) return { ok: true, success: [], errors: [], unknownIds: [] };
+
+    // 1 pedido mantém exatamente o fluxo unitário.
+    if (ids.length === 1) {
+      return await runPluginPrintJob(ids, timeoutMs);
+    }
+
+    // Lote: o Print Plugin tem apresentado travamento intermitente quando recebe
+    // vários IDs de uma vez. Enviar sequencialmente preserva a impressão em massa
+    // para o operador, mas cada printMany contém somente 1 pedido — o caminho que
+    // já é estável na impressão unitária.
+    const success = [];
+    const errors = [];
+    const unknownIds = [];
+    const perOrderTimeout = Math.min(30000, Math.max(15000, Math.floor(timeoutMs / 2)));
+
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index];
+      setMessage(`Enviando etiqueta ${index + 1}/${ids.length} ao plugin oficial...`, 'info');
+
+      let result;
+      try {
+        result = await runPluginPrintJob([id], perOrderTimeout);
+      } catch (error) {
+        errors.push({ orderId: id, detail: { message: error?.message || String(error) } });
+        continue;
+      }
+
+      success.push(...(result.success || []));
+      errors.push(...(result.errors || []));
+      if (Array.isArray(result.unknownIds)) unknownIds.push(...result.unknownIds);
+
+      // Pequeno respiro entre comandos para o plugin/printer concluir a fila local.
+      if (index < ids.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 120));
+      }
+    }
+
+    return {
+      ok: errors.length === 0 && unknownIds.length === 0 && success.length === ids.length,
+      success,
+      errors,
+      unknownIds: [...new Set(unknownIds.map(norm).filter(Boolean))],
+    };
   }
 
   async function postForm(url, params) {
