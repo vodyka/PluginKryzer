@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.8';
+  const VERSION = '0.5.0.9';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -3073,6 +3073,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
     if (done >= job.expected.size) {
       clearTimeout(job.timeout);
+      clearTimeout(job.printManyRetryTimer);
       state.activePrintJob = null;
       flightLog('print_job_complete_from_plugin', {
         expected: [...job.expected],
@@ -3085,6 +3086,141 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
       });
     }
+  }
+
+  function unresolvedPrintJobIds(job) {
+    if (!job) return [];
+    return [...(job.expected || [])].filter(id =>
+      !job.success?.has?.(id) && !job.errors?.has?.(id)
+    );
+  }
+
+  function finishRejectedPrintJob(job, message) {
+    if (!job || state.activePrintJob !== job) return;
+    clearTimeout(job.timeout);
+    clearTimeout(job.printManyRetryTimer);
+
+    const unresolved = unresolvedPrintJobIds(job);
+    unresolved.forEach(id => {
+      job.errors.set(id, {
+        orderIdStr: id,
+        errorMsg: message || 'O plugin recusou a impressão.',
+        source: 'printMany',
+      });
+    });
+
+    state.activePrintJob = null;
+    flightLog('print_many_retries_exhausted', {
+      retries: job.printManyRetryCount || 0,
+      unresolved,
+      message: message || '',
+    }, 'error', true);
+
+    job.resolve({
+      ok: false,
+      success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
+      errors: [...job.errors.entries()].map(([orderId, detail]) => ({ orderId, detail })),
+      unknownIds: [],
+    });
+  }
+
+  function handlePluginPrintManyResponse(message) {
+    const job = state.activePrintJob;
+    if (!job || message?.method !== 'printMany') return false;
+
+    const code = norm(message.code).toUpperCase();
+    const msg = norm(message.message);
+    if (code === 'SUCCESS') {
+      flightLog('print_many_ack_success', {
+        retries: job.printManyRetryCount || 0,
+        message: msg,
+      }, 'info', true);
+      return true;
+    }
+
+    if (code !== 'FAIL') return false;
+
+    const busy = /impress[aã]o em espera|tente mais tarde|try again later|waiting|busy/i.test(msg);
+    flightLog('print_many_ack_fail', {
+      busy,
+      retries: job.printManyRetryCount || 0,
+      message: msg,
+      unresolved: unresolvedPrintJobIds(job),
+    }, 'warn', true);
+
+    if (!busy) {
+      finishRejectedPrintJob(job, msg || 'O plugin recusou a impressão.');
+      return true;
+    }
+
+    const delays = [700, 1400, 2500, 4000, 6000];
+    const attempt = Number(job.printManyRetryCount || 0);
+
+    if (attempt >= delays.length) {
+      finishRejectedPrintJob(job, msg || 'O plugin permaneceu ocupado.');
+      return true;
+    }
+
+    const delay = delays[attempt];
+    job.printManyRetryCount = attempt + 1;
+    clearTimeout(job.printManyRetryTimer);
+
+    setMessage(`Plugin de impressão ocupado. Nova tentativa em ${(delay / 1000).toFixed(delay >= 1000 ? 1 : 0)}s (${job.printManyRetryCount}/${delays.length})...`, 'warn');
+    scheduleRender();
+
+    flightLog('print_many_retry_scheduled', {
+      attempt: job.printManyRetryCount,
+      maxAttempts: delays.length,
+      delayMs: delay,
+      unresolved: unresolvedPrintJobIds(job),
+    }, 'warn', true);
+
+    job.printManyRetryTimer = setTimeout(async () => {
+      if (state.activePrintJob !== job) return;
+      const ids = unresolvedPrintJobIds(job);
+      if (!ids.length) return;
+
+      try {
+        if (pluginSocket?.readyState !== WebSocket.OPEN) {
+          flightLog('print_many_retry_reconnect', {
+            attempt: job.printManyRetryCount,
+            readyState: pluginSocket?.readyState ?? null,
+          }, 'warn', true);
+          await connectPrintPlugin(false);
+        }
+
+        if (state.activePrintJob !== job) return;
+        if (pluginSocket?.readyState !== WebSocket.OPEN) {
+          throw new Error('Plugin de impressão desconectado durante a nova tentativa.');
+        }
+
+        // Reafirma a impressora apenas antes do novo envio. O plugin pode ter
+        // concluído a fila anterior entre uma tentativa e outra.
+        pluginSend('changePrinter', [state.printer]);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (state.activePrintJob !== job) return;
+
+        flightLog('print_many_retry_dispatch', {
+          attempt: job.printManyRetryCount,
+          ids,
+        }, 'info', true);
+        pluginSend('printMany', [ids]);
+      } catch (error) {
+        flightLog('print_many_retry_error', {
+          attempt: job.printManyRetryCount,
+          error: error?.message || String(error),
+        }, 'error', true);
+
+        // Reutiliza o mesmo mecanismo de retry enquanto ainda há tentativas.
+        handlePluginPrintManyResponse({
+          method: 'printMany',
+          code: 'FAIL',
+          message: error?.message || 'Falha ao reenviar impressão. Tente mais tarde.',
+        });
+      }
+    }, delay);
+
+    return true;
   }
 
   function handlePluginMessage(event) {
@@ -3112,6 +3248,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.printer) localStorage.setItem(STORAGE_PRINTER, state.printer);
       }
       scheduleRender();
+      return;
+    }
+    if (message.method === 'printMany') {
+      handlePluginPrintManyResponse(message);
       return;
     }
     if (message.method === 'printProcess') handlePluginPrintProcess(message);
@@ -3282,12 +3422,15 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         marked: new Set(),
         markFailed: new Set(),
         autoMark: options.autoMark !== false,
+        printManyRetryCount: 0,
+        printManyRetryTimer: null,
         resolve,
         reject,
         timeout: null,
       };
       job.timeout = setTimeout(() => {
         if (state.activePrintJob !== job) return;
+        clearTimeout(job.printManyRetryTimer);
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
         appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
@@ -3312,6 +3455,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         flightLog('print_many_dispatched', { ids }, 'info', true);
       } catch (error) {
         clearTimeout(job.timeout);
+        clearTimeout(job.printManyRetryTimer);
         state.activePrintJob = null;
         reject(error);
       }
