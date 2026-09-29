@@ -3540,7 +3540,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       return;
     }
 
-    const owns = await claimPrintOwnership(forceReconnect ? 'manual_reconnect' : 'heartbeat', true);
+    const owns = await claimPrintOwnership(forceReconnect ? 'manual_reconnect' : 'heartbeat', forceReconnect);
     if (!owns) {
       closePluginSocketForOwnership('other_tab_owner');
       return;
