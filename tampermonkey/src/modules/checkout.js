@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.9';
+  const VERSION = '0.5.1.0';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -41,7 +41,9 @@ function initCheckoutModule() {
   const MAX_SYSTEM_LOGS = 500;
   const STORAGE_FLIGHT_LOGS = 'kz_quick_checkout_flight_recorder_v1';
   const STORAGE_FLIGHT_SESSION = 'kz_quick_checkout_flight_session_v1';
+  const STORAGE_PRINT_OWNER = 'kz_quick_checkout_print_owner_v1';
   const MAX_FLIGHT_LOGS = 2500;
+  const PRINT_OWNER_TTL_MS = 8000;
   const STORAGE_LAST_PRINTED = 'kz_quick_checkout_last_printed_v1';
   const STORAGE_PRINT_HISTORY = 'kz_quick_checkout_print_history_v1';
   const STORAGE_ABNORMAL = 'kz_quick_checkout_abnormal_v1';
@@ -123,6 +125,17 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   let pluginSocket = null;
   let pluginConnectPromise = null;
   let pluginReconnectTimer = null;
+  let pluginBoundPuid = 0;
+  let pluginMessageWaiters = [];
+  const PRINT_TAB_ID = (() => {
+    const key = 'kz_quick_checkout_tab_id_v1';
+    let id = sessionStorage.getItem(key);
+    if (!id) {
+      id = 'TAB-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,8).toUpperCase();
+      sessionStorage.setItem(key, id);
+    }
+    return id;
+  })();
   let renderTimer = null;
   let refreshSequence = 0;
   let lastOrdersFingerprint = '';
@@ -1597,6 +1610,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       agentOnline: Boolean(state.agentOnline),
       pluginStatus: state.pluginStatus,
       socketReadyState: pluginSocket?.readyState ?? null,
+      pluginPuid: Number(state.pluginPuid || 0),
+      pluginBoundPuid: Number(pluginBoundPuid || 0),
+      printTabId: PRINT_TAB_ID,
+      printOwner: readPrintOwner(),
       printer: state.printer || '',
       activePrintJob: job ? {
         expected: [...(job.expected || [])],
@@ -2912,6 +2929,152 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     return state.orders.find(order => norm(order.orderNo).toUpperCase() === target) || null;
   }
 
+  function readPrintOwner() {
+    return readJson(STORAGE_PRINT_OWNER, null);
+  }
+
+  function isFreshPrintOwner(owner) {
+    return Boolean(owner?.tabId && (Date.now() - Number(owner.at || 0)) < PRINT_OWNER_TTL_MS);
+  }
+
+  function isThisTabPrintOwner() {
+    const owner = readPrintOwner();
+    return isFreshPrintOwner(owner) && owner.tabId === PRINT_TAB_ID;
+  }
+
+  function writePrintOwner(extra = {}) {
+    const owner = {
+      tabId: PRINT_TAB_ID,
+      puid: Number(state.pluginPuid || 0),
+      at: Date.now(),
+      printing: Boolean(state.loading || state.activePrintJob),
+      visible: document.visibilityState === 'visible',
+      href: location.pathname + location.search,
+      ...extra,
+    };
+    saveJson(STORAGE_PRINT_OWNER, owner);
+    return owner;
+  }
+
+  function closePluginSocketForOwnership(reason = '') {
+    clearTimeout(pluginReconnectTimer);
+    pluginReconnectTimer = null;
+    pluginBoundPuid = 0;
+    try {
+      if (pluginSocket && pluginSocket.readyState <= WebSocket.OPEN) pluginSocket.close(1000, 'ownership-change');
+    } catch {}
+    pluginSocket = null;
+    state.agentOnline = false;
+    state.pluginStatus = 'aguardando aba ativa';
+    flightLog('print_owner_socket_released', { reason, tabId: PRINT_TAB_ID }, 'info', true);
+    scheduleRender();
+  }
+
+  function releasePrintOwnership(reason = '') {
+    const owner = readPrintOwner();
+    if (owner?.tabId === PRINT_TAB_ID) {
+      try { localStorage.removeItem(STORAGE_PRINT_OWNER); } catch {}
+      flightLog('print_owner_released', { reason, tabId: PRINT_TAB_ID }, 'info', true);
+    }
+  }
+
+  async function claimPrintOwnership(reason = 'heartbeat', allowTakeover = true) {
+    const puid = await getPluginPuid();
+    const current = readPrintOwner();
+
+    if (isFreshPrintOwner(current) && current.tabId !== PRINT_TAB_ID) {
+      if (current.printing) {
+        flightLog('print_owner_blocked_other_printing', {
+          reason,
+          currentOwner: current,
+          requestedPuid: puid,
+        }, 'warn', true);
+        return false;
+      }
+      if (!allowTakeover) return false;
+    }
+
+    writePrintOwner({ puid, reason });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    const confirmed = readPrintOwner();
+    const mine = confirmed?.tabId === PRINT_TAB_ID;
+    flightLog(mine ? 'print_owner_claimed' : 'print_owner_lost_race', {
+      reason,
+      puid,
+      confirmedOwner: confirmed,
+    }, mine ? 'info' : 'warn', true);
+    return mine;
+  }
+
+  function resolvePluginWaiters(message) {
+    if (!pluginMessageWaiters.length) return;
+    const remaining = [];
+    for (const waiter of pluginMessageWaiters) {
+      if (waiter.method === message?.method && (!waiter.predicate || waiter.predicate(message))) {
+        clearTimeout(waiter.timer);
+        try { waiter.resolve(message); } catch {}
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    pluginMessageWaiters = remaining;
+  }
+
+  function waitForPluginMessage(method, timeoutMs = 2500, predicate = null) {
+    return new Promise((resolve, reject) => {
+      const waiter = { method, predicate, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        pluginMessageWaiters = pluginMessageWaiters.filter(item => item !== waiter);
+        reject(new Error(`Timeout aguardando resposta ${method} do Print Plugin.`));
+      }, timeoutMs);
+      pluginMessageWaiters.push(waiter);
+    });
+  }
+
+  async function ensurePluginSession(forceReconnect = false, reason = 'print') {
+    const owns = await claimPrintOwnership(reason, true);
+    if (!owns) {
+      throw new Error('Outra aba do UpSeller está usando o Print Plugin neste momento.');
+    }
+
+    const puid = await getPluginPuid();
+    if (!puid) throw new Error('Não foi possível identificar o PUID desta conta UpSeller.');
+
+    await connectPrintPlugin(forceReconnect);
+    if (!pluginSocket || pluginSocket.readyState !== WebSocket.OPEN) {
+      throw new Error('Print Plugin não ficou conectado.');
+    }
+
+    // Vincula explicitamente a conta apenas imediatamente antes de imprimir.
+    // Isso evita uma aba antiga trocar o PUID do aplicativo só por estar aberta.
+    const puidWait = waitForPluginMessage('setPuid', 3000);
+    pluginSend('setPuid', [puid]);
+    const puidReply = await puidWait;
+    if (norm(puidReply?.code).toUpperCase() !== 'SUCCESS') {
+      throw new Error(puidReply?.message || 'Print Plugin recusou o PUID desta conta.');
+    }
+    pluginBoundPuid = puid;
+
+    if (state.printer) {
+      const printerWait = waitForPluginMessage('changePrinterResponse', 3000);
+      pluginSend('changePrinter', [state.printer]);
+      const printerReply = await printerWait;
+      if (norm(printerReply?.code).toUpperCase() !== 'SUCCESS') {
+        throw new Error(printerReply?.message || 'Print Plugin recusou a impressora selecionada.');
+      }
+    }
+
+    writePrintOwner({ puid, reason, printing: Boolean(state.loading || state.activePrintJob) });
+    flightLog('plugin_session_ready', {
+      reason,
+      puid,
+      printer: state.printer || '',
+      forceReconnect,
+      tabId: PRINT_TAB_ID,
+    }, 'info', true);
+    return true;
+  }
+
   async function getPluginPuid() {
     if (state.pluginPuid) return state.pluginPuid;
     try {
@@ -3075,6 +3238,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       clearTimeout(job.timeout);
       clearTimeout(job.printManyRetryTimer);
       state.activePrintJob = null;
+      writePrintOwner({ printing: false, puid: pluginBoundPuid || state.pluginPuid || 0 });
       flightLog('print_job_complete_from_plugin', {
         expected: [...job.expected],
         success: [...job.success.keys()],
@@ -3110,6 +3274,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     });
 
     state.activePrintJob = null;
+    writePrintOwner({ printing: false, puid: pluginBoundPuid || state.pluginPuid || 0 });
     flightLog('print_many_retries_exhausted', {
       retries: job.printManyRetryCount || 0,
       unresolved,
@@ -3181,28 +3346,26 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       if (!ids.length) return;
 
       try {
-        if (pluginSocket?.readyState !== WebSocket.OPEN) {
-          flightLog('print_many_retry_reconnect', {
-            attempt: job.printManyRetryCount,
-            readyState: pluginSocket?.readyState ?? null,
-          }, 'warn', true);
-          await connectPrintPlugin(false);
-        }
+        flightLog('print_many_retry_reconnect', {
+          attempt: job.printManyRetryCount,
+          readyState: pluginSocket?.readyState ?? null,
+          currentBoundPuid: pluginBoundPuid,
+        }, 'warn', true);
+
+        // "Impressão em espera" pode ser estado preso da sessão anterior.
+        // Faz reconnect limpo, reaplica o PUID atual e espera o SUCCESS real
+        // antes de reenviar o mesmo job.
+        await ensurePluginSession(true, 'busy_retry_' + job.printManyRetryCount);
 
         if (state.activePrintJob !== job) return;
         if (pluginSocket?.readyState !== WebSocket.OPEN) {
           throw new Error('Plugin de impressão desconectado durante a nova tentativa.');
         }
 
-        // Reafirma a impressora apenas antes do novo envio. O plugin pode ter
-        // concluído a fila anterior entre uma tentativa e outra.
-        pluginSend('changePrinter', [state.printer]);
-        await new Promise(resolve => setTimeout(resolve, 100));
-        if (state.activePrintJob !== job) return;
-
         flightLog('print_many_retry_dispatch', {
           attempt: job.printManyRetryCount,
           ids,
+          boundPuid: pluginBoundPuid,
         }, 'info', true);
         pluginSend('printMany', [ids]);
       } catch (error) {
@@ -3237,6 +3400,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       data: message.data ?? null,
     }, 'info', message.method === 'printProcess');
     console.log('[KZ Checkout][Plugin]', message);
+    resolvePluginWaiters(message);
 
     if (message.method === 'getPrinter' && message.code === 'SUCCESS') {
       state.agentOnline = true;
@@ -3302,13 +3466,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         pluginSocket.addEventListener('open', () => {
           flightLog('plugin_socket_open', { force, puid }, 'info', true);
           try {
+            // Abrir a conexão NÃO vincula mais conta nem impressora.
+            // setPuid/changePrinter só acontecem em ensurePluginSession(), imediatamente
+            // antes de uma impressão real.
             pluginSend('getPrinter', null);
-            if (puid) pluginSend('setPuid', [puid]);
-            setTimeout(() => {
-              if (state.printer && pluginSocket?.readyState === WebSocket.OPEN) {
-                pluginSend('changePrinter', [state.printer]);
-              }
-            }, 80);
             state.agentOnline = true;
             state.pluginStatus = 'conectado';
             scheduleRender();
@@ -3336,10 +3497,13 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
           // sempre — sem essa checagem, cada tentativa falha e chama scheduleRender(),
           // recriando o painel inteiro (e resetando o scroll) a cada 5s indefinidamente.
           const wasOnline = state.agentOnline;
+          pluginBoundPuid = 0;
           state.agentOnline = false;
           state.pluginStatus = 'desconectado';
           if (wasOnline) scheduleRender();
-          if (!state.loading) pluginReconnectTimer = setTimeout(() => connectPrintPlugin(false).catch(() => {}), 5000);
+          if (!state.loading && document.visibilityState === 'visible' && isThisTabPrintOwner()) {
+            pluginReconnectTimer = setTimeout(() => connectPrintPlugin(false).catch(() => {}), 5000);
+          }
         });
         pluginSocket.addEventListener('error', event => {
           flightLog('plugin_socket_error', { type: event?.type || 'error' }, 'error', true);
@@ -3361,14 +3525,24 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function refreshAgent(forceReconnect = false) {
-    // O heartbeat roda a cada 20s. Ele NUNCA pode fechar o socket usado por um
-    // printMany em andamento, senão o retorno printProcess se perde e o checkout
-    // termina com 0 confirmações mesmo com o plugin aparecendo conectado.
     if (state.loading || state.activePrintJob) {
+      writePrintOwner({ printing: true });
       if (forceReconnect) {
         setMessage('Aguarde a impressão atual terminar antes de reconectar o plugin.', 'warn');
         scheduleRender();
       }
+      return;
+    }
+
+    if (document.visibilityState !== 'visible') {
+      releasePrintOwnership('tab_hidden');
+      closePluginSocketForOwnership('tab_hidden');
+      return;
+    }
+
+    const owns = await claimPrintOwnership(forceReconnect ? 'manual_reconnect' : 'heartbeat', true);
+    if (!owns) {
+      closePluginSocketForOwnership('other_tab_owner');
       return;
     }
 
@@ -3383,6 +3557,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
       if (pluginSocket?.readyState === WebSocket.OPEN) {
         pluginSend('getPrinter', null);
+        writePrintOwner({ printing: false });
       }
     } catch (error) {
       state.agentOnline = false;
@@ -3403,13 +3578,15 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     }, 'info', true);
 
     if (!orders.length) return { ok: true, success: [], errors: [] };
-    await connectPrintPlugin(false);
-    flightLog('print_job_after_connect', { orderIds: requestedIds }, 'info', true);
     if (!state.printer) throw new Error('Selecione uma impressora.');
     if (state.activePrintJob) throw new Error('Já existe uma impressão em andamento.');
 
-    pluginSend('changePrinter', [state.printer]);
-    await new Promise(resolve => setTimeout(resolve, 120));
+    await ensurePluginSession(false, 'print_start');
+    flightLog('print_job_after_connect', {
+      orderIds: requestedIds,
+      boundPuid: pluginBoundPuid,
+      tabId: PRINT_TAB_ID,
+    }, 'info', true);
 
     return await new Promise((resolve, reject) => {
       const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
@@ -3432,6 +3609,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         if (state.activePrintJob !== job) return;
         clearTimeout(job.printManyRetryTimer);
         state.activePrintJob = null;
+        writePrintOwner({ printing: false, puid: pluginBoundPuid || state.pluginPuid || 0 });
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
         appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
         flightLog('print_job_timeout', {
@@ -3449,7 +3627,8 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         });
       }, timeoutMs);
       state.activePrintJob = job;
-      flightLog('print_job_activated', { ids }, 'info', true);
+      writePrintOwner({ printing: true, puid: pluginBoundPuid || state.pluginPuid || 0 });
+      flightLog('print_job_activated', { ids, boundPuid: pluginBoundPuid, tabId: PRINT_TAB_ID }, 'info', true);
       try {
         pluginSend('printMany', [ids]);
         flightLog('print_many_dispatched', { ids }, 'info', true);
@@ -5224,7 +5403,31 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
         }
       }, REFRESH_INTERVAL_MS);
 
-      agentTimer = setInterval(() => refreshAgent(false), 20000);
+      agentTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') refreshAgent(false);
+      }, 5000);
+
+      document.addEventListener('visibilitychange', () => {
+        flightLog('visibility_changed', { visibility: document.visibilityState }, 'info', true);
+        if (document.visibilityState === 'visible') {
+          refreshAgent(false);
+        } else if (!state.loading && !state.activePrintJob) {
+          releasePrintOwnership('visibility_hidden');
+          closePluginSocketForOwnership('visibility_hidden');
+        }
+      });
+
+      window.addEventListener('storage', event => {
+        if (event.key !== STORAGE_PRINT_OWNER) return;
+        const owner = readPrintOwner();
+        if (owner?.tabId && owner.tabId !== PRINT_TAB_ID && !state.loading && !state.activePrintJob) {
+          closePluginSocketForOwnership('ownership_taken_by_other_tab');
+        }
+      });
+
+      window.addEventListener('beforeunload', () => {
+        if (!state.loading && !state.activePrintJob) releasePrintOwnership('beforeunload');
+      });
     };
 
     const syncRouteUi = () => {
