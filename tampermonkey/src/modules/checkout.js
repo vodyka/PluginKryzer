@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.7';
+  const VERSION = '0.5.0.8';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -39,6 +39,9 @@ function initCheckoutModule() {
   const STORAGE_FILTERS = 'kz_quick_checkout_filters_v1';
   const STORAGE_LOGS = 'kz_quick_checkout_system_logs_v1';
   const MAX_SYSTEM_LOGS = 500;
+  const STORAGE_FLIGHT_LOGS = 'kz_quick_checkout_flight_recorder_v1';
+  const STORAGE_FLIGHT_SESSION = 'kz_quick_checkout_flight_session_v1';
+  const MAX_FLIGHT_LOGS = 2500;
   const STORAGE_LAST_PRINTED = 'kz_quick_checkout_last_printed_v1';
   const STORAGE_PRINT_HISTORY = 'kz_quick_checkout_print_history_v1';
   const STORAGE_ABNORMAL = 'kz_quick_checkout_abnormal_v1';
@@ -95,6 +98,8 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     stuckVoidedOrders: readJson(STORAGE_STUCK_VOIDED, []),
     filters: readJson(STORAGE_FILTERS, { channelSelection: {}, warehouses: [], onlyToday: false, priorityFirst: true }),
     systemLogs: readJson(STORAGE_LOGS, []),
+    flightLogs: readJson(STORAGE_FLIGHT_LOGS, []),
+    flightSessionId: localStorage.getItem(STORAGE_FLIGHT_SESSION) || '',
     lastPrinted: readJson(STORAGE_LAST_PRINTED, null),
     printHistory: readJson(STORAGE_PRINT_HISTORY, []),
     analysisFailures: 0,
@@ -1573,6 +1578,125 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     }
   }
 
+  function ensureFlightSession() {
+    if (state.flightSessionId) return state.flightSessionId;
+    const sessionId = 'FR-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,8).toUpperCase();
+    state.flightSessionId = sessionId;
+    try { localStorage.setItem(STORAGE_FLIGHT_SESSION, sessionId); } catch {}
+    return sessionId;
+  }
+
+  function flightStateSnapshot() {
+    const job = state.activePrintJob;
+    const checkout = state.checkoutSession;
+    return {
+      version: VERSION,
+      href: location.pathname + location.search,
+      visibility: document.visibilityState,
+      loading: Boolean(state.loading),
+      agentOnline: Boolean(state.agentOnline),
+      pluginStatus: state.pluginStatus,
+      socketReadyState: pluginSocket?.readyState ?? null,
+      printer: state.printer || '',
+      activePrintJob: job ? {
+        expected: [...(job.expected || [])],
+        success: [...(job.success?.keys?.() || [])],
+        errors: [...(job.errors?.keys?.() || [])],
+        autoMark: job.autoMark !== false,
+      } : null,
+      checkoutSession: checkout ? {
+        orderId: checkout.orderId || '',
+        orderIds: checkout.orderIds || [],
+        orderNo: checkout.orderNo || '',
+        status: checkout.status || '',
+        ordersCount: checkout.ordersCount || 1,
+        required: (checkout.required || []).map(row => ({
+          sku: row.sku || '',
+          qty: Number(row.qty || 0),
+          scanned: Number(row.scanned || 0),
+        })),
+      } : null,
+      pendingMarkIds: (state.pending?.orderIds || []).map(norm),
+    };
+  }
+
+  function flightLog(event, details = {}, level = 'info', withState = false) {
+    try {
+      const row = {
+        seq: ((state.flightLogs?.[state.flightLogs.length - 1]?.seq || 0) + 1),
+        at: new Date().toISOString(),
+        perfMs: Math.round((performance?.now?.() || 0) * 1000) / 1000,
+        sessionId: ensureFlightSession(),
+        level: String(level || 'info'),
+        event: String(event || 'event'),
+        details: details && typeof details === 'object' ? details : { value: String(details) },
+      };
+      if (withState) row.state = flightStateSnapshot();
+
+      state.flightLogs = [...(state.flightLogs || []), row].slice(-MAX_FLIGHT_LOGS);
+      saveJson(STORAGE_FLIGHT_LOGS, state.flightLogs);
+
+      const fn = row.level === 'error' ? console.error : row.level === 'warn' ? console.warn : console.debug;
+      fn('[KZ Flight]', row.seq, row.event, row.details);
+      return row;
+    } catch (error) {
+      console.warn('[KZ Checkout] falha ao gravar flight log', error);
+      return null;
+    }
+  }
+
+  function flightLogsText() {
+    const header = {
+      exportedAt: new Date().toISOString(),
+      checkoutVersion: VERSION,
+      sessionId: ensureFlightSession(),
+      totalRows: (state.flightLogs || []).length,
+      currentState: flightStateSnapshot(),
+      userAgent: navigator.userAgent,
+    };
+    const rows = (state.flightLogs || []).map(row => {
+      let details = '';
+      let stateText = '';
+      try { details = JSON.stringify(row.details || {}); } catch { details = String(row.details || ''); }
+      try { if (row.state) stateText = ' STATE=' + JSON.stringify(row.state); } catch {}
+      return `[${row.seq}] [${row.at}] [${String(row.level || 'info').toUpperCase()}] ${row.event} ${details}${stateText}`;
+    });
+    return '# KRYZER CHECKOUT FLIGHT RECORDER\n' + JSON.stringify(header) + '\n' + rows.join('\n');
+  }
+
+  function clearFlightLogs() {
+    state.flightLogs = [];
+    try { localStorage.removeItem(STORAGE_FLIGHT_LOGS); } catch {}
+    flightLog('flight_logs_cleared', {}, 'info', true);
+  }
+
+  function showFlightLogsModal() {
+    document.getElementById('kzqc-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'kzqc-modal';
+    const text = flightLogsText();
+    modal.innerHTML = `<div class="kzqc-modal-card kzqc-modal-wide kzqc-log-modal"><div class="kzqc-modal-title">Diagnóstico local · Caixa-preta</div><div class="kzqc-modal-subtitle">Persistente no navegador e preservado após F5. Registra WebSocket, printMany, printProcess, mark-print, scanner, checkout e erros JS. Sessão: ${escapeHtml(ensureFlightSession())}</div><textarea id="kzqc-flight-text" readonly>${escapeHtml(text || 'Nenhum diagnóstico registrado ainda.')}</textarea><div class="kzqc-modal-actions"><button id="kzqc-flight-clear" class="danger">Limpar diagnóstico</button><button id="kzqc-cancel" class="secondary">Fechar</button><button id="kzqc-flight-copy" class="primary">Copiar diagnóstico</button></div></div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('#kzqc-cancel').onclick = () => modal.remove();
+    modal.querySelector('#kzqc-flight-clear').onclick = () => {
+      clearFlightLogs();
+      modal.remove();
+      showFlightLogsModal();
+    };
+    modal.querySelector('#kzqc-flight-copy').onclick = async () => {
+      const value = flightLogsText() || 'Nenhum diagnóstico registrado.';
+      try {
+        await navigator.clipboard.writeText(value);
+        setMessage('Diagnóstico local copiado. Cole no chat.', 'success');
+      } catch {
+        const area = modal.querySelector('#kzqc-flight-text');
+        area.select();
+        document.execCommand('copy');
+      }
+    };
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+  }
+
   function systemLogsText() {
     return (state.systemLogs || []).map(row => {
       let details = '';
@@ -2802,10 +2926,26 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   function pluginSend(method, params = null) {
+    const readyState = pluginSocket?.readyState ?? null;
+    flightLog('plugin_send_attempt', {
+      method,
+      params,
+      readyState,
+      socketOpen: readyState === WebSocket.OPEN,
+    }, 'info', method === 'printMany');
+
     if (!pluginSocket || pluginSocket.readyState !== WebSocket.OPEN) {
+      flightLog('plugin_send_blocked_socket_not_open', { method, params, readyState }, 'error', true);
       throw new Error('Plugin de impressão do UpSeller desconectado.');
     }
-    pluginSocket.send(JSON.stringify({ method, params }));
+
+    try {
+      pluginSocket.send(JSON.stringify({ method, params }));
+      flightLog('plugin_send_ok', { method, params }, 'info', method === 'printMany');
+    } catch (error) {
+      flightLog('plugin_send_error', { method, params, error: error?.message || String(error) }, 'error', true);
+      throw error;
+    }
   }
 
   function parsePluginMessage(raw) {
@@ -2902,10 +3042,19 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
   function handlePluginPrintProcess(message) {
     const job = state.activePrintJob;
-    if (!job || message?.method !== 'printProcess') return;
-    const data = message.data || {};
+    const data = message?.data || {};
     const successRows = Array.isArray(data.printSuccess) ? data.printSuccess : [];
     const errorRows = Array.isArray(data.printError) ? data.printError : [];
+
+    flightLog('plugin_print_process_received', {
+      hasActiveJob: Boolean(job),
+      successIds: successRows.map(row => norm(row.orderIdStr || row.orderId)).filter(Boolean),
+      errorIds: errorRows.map(row => norm(row.orderIdStr || row.orderId)).filter(Boolean),
+      code: message?.code ?? null,
+      message: message?.message ?? '',
+    }, job ? 'info' : 'warn', true);
+
+    if (!job || message?.method !== 'printProcess') return;
 
     successRows.forEach(row => {
       const id = norm(row.orderIdStr || row.orderId);
@@ -2925,6 +3074,11 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     if (done >= job.expected.size) {
       clearTimeout(job.timeout);
       state.activePrintJob = null;
+      flightLog('print_job_complete_from_plugin', {
+        expected: [...job.expected],
+        success: [...job.success.keys()],
+        errors: [...job.errors.keys()],
+      }, job.errors.size ? 'warn' : 'info', true);
       job.resolve({
         ok: job.errors.size === 0,
         success: [...job.success.entries()].map(([orderId, detail]) => ({ orderId, detail })),
@@ -2934,8 +3088,18 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   function handlePluginMessage(event) {
-    const message = parsePluginMessage(event.data);
-    if (!message) return;
+    const raw = String(event?.data ?? '');
+    const message = parsePluginMessage(raw);
+    if (!message) {
+      flightLog('plugin_message_parse_error', { raw: raw.slice(0, 4000) }, 'error', true);
+      return;
+    }
+    flightLog('plugin_message_received', {
+      method: message.method || '',
+      code: message.code ?? null,
+      message: message.message ?? '',
+      data: message.data ?? null,
+    }, 'info', message.method === 'printProcess');
     console.log('[KZ Checkout][Plugin]', message);
 
     if (message.method === 'getPrinter' && message.code === 'SUCCESS') {
@@ -2954,8 +3118,20 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function connectPrintPlugin(force = false) {
-    if (!force && pluginSocket?.readyState === WebSocket.OPEN) return true;
-    if (!force && pluginConnectPromise) return pluginConnectPromise;
+    flightLog('plugin_connect_requested', {
+      force,
+      currentReadyState: pluginSocket?.readyState ?? null,
+      hasConnectPromise: Boolean(pluginConnectPromise),
+    }, 'info', true);
+
+    if (!force && pluginSocket?.readyState === WebSocket.OPEN) {
+      flightLog('plugin_connect_reuse_open_socket', {}, 'info', false);
+      return true;
+    }
+    if (!force && pluginConnectPromise) {
+      flightLog('plugin_connect_reuse_pending_promise', {}, 'info', false);
+      return pluginConnectPromise;
+    }
 
     pluginConnectPromise = (async () => {
       clearTimeout(pluginReconnectTimer);
@@ -2984,6 +3160,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         }
 
         pluginSocket.addEventListener('open', () => {
+          flightLog('plugin_socket_open', { force, puid }, 'info', true);
           try {
             pluginSend('getPrinter', null);
             if (puid) pluginSend('setPuid', [puid]);
@@ -3009,7 +3186,12 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
           }
         });
         pluginSocket.addEventListener('message', handlePluginMessage);
-        pluginSocket.addEventListener('close', () => {
+        pluginSocket.addEventListener('close', event => {
+          flightLog('plugin_socket_close', {
+            code: event?.code ?? null,
+            reason: event?.reason || '',
+            wasClean: event?.wasClean ?? null,
+          }, 'warn', true);
           // Enquanto o plugin estiver desligado, isso tenta reconectar a cada 5s para
           // sempre — sem essa checagem, cada tentativa falha e chama scheduleRender(),
           // recriando o painel inteiro (e resetando o scroll) a cada 5s indefinidamente.
@@ -3019,7 +3201,8 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
           if (wasOnline) scheduleRender();
           if (!state.loading) pluginReconnectTimer = setTimeout(() => connectPrintPlugin(false).catch(() => {}), 5000);
         });
-        pluginSocket.addEventListener('error', () => {
+        pluginSocket.addEventListener('error', event => {
+          flightLog('plugin_socket_error', { type: event?.type || 'error' }, 'error', true);
           const wasOnline = state.agentOnline;
           state.agentOnline = false;
           state.pluginStatus = 'erro';
@@ -3071,8 +3254,17 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function printOrdersWithPlugin(orders, timeoutMs = 60000, options = {}) {
+    const requestedIds = (orders || []).map(order => norm(order?.idStr)).filter(Boolean);
+    flightLog('print_job_requested', {
+      orderIds: requestedIds,
+      timeoutMs,
+      autoMark: options.autoMark !== false,
+      printer: state.printer || '',
+    }, 'info', true);
+
     if (!orders.length) return { ok: true, success: [], errors: [] };
     await connectPrintPlugin(false);
+    flightLog('print_job_after_connect', { orderIds: requestedIds }, 'info', true);
     if (!state.printer) throw new Error('Selecione uma impressora.');
     if (state.activePrintJob) throw new Error('Já existe uma impressão em andamento.');
 
@@ -3081,6 +3273,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
 
     return await new Promise((resolve, reject) => {
       const ids = orders.map(order => norm(order.idStr)).filter(Boolean);
+      flightLog('print_job_create', { ids, printer: state.printer || '' }, 'info', true);
       const job = {
         expected: new Set(ids),
         success: new Map(),
@@ -3098,6 +3291,12 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         state.activePrintJob = null;
         const unknownIds = [...job.expected].filter(id => !job.success.has(id) && !job.errors.has(id));
         appLog('warn', 'plugin_timeout_parcial', { confirmados: job.success.size, erros: job.errors.size, desconhecidos: unknownIds, total: job.expected.size });
+        flightLog('print_job_timeout', {
+          expected: [...job.expected],
+          success: [...job.success.keys()],
+          errors: [...job.errors.keys()],
+          unknownIds,
+        }, 'error', true);
         resolve({
           ok: false,
           timedOut: true,
@@ -3107,8 +3306,10 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
         });
       }, timeoutMs);
       state.activePrintJob = job;
+      flightLog('print_job_activated', { ids }, 'info', true);
       try {
         pluginSend('printMany', [ids]);
+        flightLog('print_many_dispatched', { ids }, 'info', true);
       } catch (error) {
         clearTimeout(job.timeout);
         state.activePrintJob = null;
@@ -3288,6 +3489,7 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
   }
 
   async function markOrders(orderIds) {
+    flightLog('mark_print_start', { orderIds: (orderIds || []).map(norm).filter(Boolean) }, 'info', true);
     const body = new URLSearchParams();
     body.set('isBatch', '0');
     body.set('mark', '1');
@@ -3297,6 +3499,11 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     try {
       const batch = await postForm('/api/order/mark-print', body);
       console.log('[KZ Checkout] mark-print lote:', batch.json);
+      flightLog('mark_print_batch_response', {
+        orderIds,
+        httpStatus: batch.response?.status ?? null,
+        json: batch.json,
+      }, isSuccess(batch.json) ? 'info' : 'warn', true);
       if (isSuccess(batch.json)) return { ok: true, failedIds: [] };
     } catch (error) {
       console.warn('[KZ Checkout] mark-print lote falhou:', error);
@@ -3395,7 +3602,9 @@ Isso NÃO chama mark-print novamente.`)) return;
       console.error('[KZ Checkout] reimpressão:', error);
       setMessage(error.message || String(error), 'error');
     } finally {
+      flightLog('execute_print_finally_before_unlock', {}, 'info', true);
       state.loading = false;
+      flightLog('execute_print_unlocked', {}, 'info', true);
       scheduleRender();
     }
   }
@@ -3443,7 +3652,17 @@ Isso NÃO chama mark-print novamente.`)) return;
   }
 
   async function executePrint(group, qty) {
-    if (state.loading) return false;
+    flightLog('execute_print_enter', {
+      qty,
+      groupSku: group?.sku || '',
+      label: group?.label || '',
+      orderIds: (group?.orders || []).slice(0, qty).map(order => norm(order?.idStr)).filter(Boolean),
+    }, 'info', true);
+
+    if (state.loading) {
+      flightLog('execute_print_blocked_loading', {}, 'warn', true);
+      return false;
+    }
     if (!state.agentOnline) {
       setMessage('O UpSeller Print Plugin não está conectado.', 'error');
       return false;
@@ -3460,7 +3679,14 @@ Isso NÃO chama mark-print novamente.`)) return;
     scheduleRender();
 
     try {
+      flightLog('execute_print_before_plugin', { orderIds: selectedOrders.map(order => order.idStr) }, 'info', true);
       const printResult = await printOrdersWithPlugin(selectedOrders);
+      flightLog('execute_print_after_plugin', {
+        successIds: (printResult.success || []).map(row => row.orderId),
+        errorIds: (printResult.errors || []).map(row => row.orderId),
+        unknownIds: printResult.unknownIds || [],
+        timedOut: Boolean(printResult.timedOut),
+      }, printResult.timedOut ? 'warn' : 'info', true);
       const successIds = printResult.success.map(row => row.orderId);
       const failedIds = printResult.errors.map(row => row.orderId);
       const unknownIds = Array.isArray(printResult.unknownIds) ? printResult.unknownIds.map(norm).filter(Boolean) : [];
@@ -3526,6 +3752,10 @@ Isso NÃO chama mark-print novamente.`)) return;
       postBridge('REFRESH_ORDER_INDEX');
       return successIds.length > 0;
     } catch (error) {
+      flightLog('execute_print_error', {
+        error: error?.message || String(error),
+        stack: error?.stack || '',
+      }, 'error', true);
       console.error('[KZ Checkout] impressão:', error);
       const isTimeout = /Tempo esgotado/i.test(error?.message || '');
       if (isTimeout) {
@@ -3735,6 +3965,7 @@ Isso NÃO chama mark-print novamente.`)) return;
   }
 
   async function finishCheckout() {
+    flightLog('finish_checkout_enter', {}, 'info', true);
     const session = state.checkoutSession;
     if (!session || session.status === 'printing') return;
     const progress = checkoutProgress(session);
@@ -3785,6 +4016,7 @@ Isso NÃO chama mark-print novamente.`)) return;
   }
 
   function scanCheckoutItem(value) {
+    flightLog('checkout_scan_input', { value: String(value ?? '') }, 'info', true);
     const session = state.checkoutSession;
     if (!session || session.status !== 'scanning') return;
     const scannedCode = normalizeScanCode(value);
@@ -3806,6 +4038,11 @@ Isso NÃO chama mark-print novamente.`)) return;
       return;
     }
     item.scanned++;
+    flightLog('checkout_scan_accepted', {
+      sku,
+      scanned: item.scanned,
+      required: item.qty,
+    }, 'info', true);
     beep(true);
     const progress = checkoutProgress(session);
     setMessage(`Leitura confirmada: ${sku} · ${progress.scanned}/${progress.total}.`, 'success');
@@ -4583,7 +4820,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
     const plAvailableCount=state.activePickList?pickListAvailableOrders().length:0;
     const plTotalCount=state.activePickList?(Number(state.activePickList.orderCount||0)||plAvailableCount):0;
     const plOutsideCount=Math.max(0,plTotalCount-plAvailableCount);
-    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Impressão em massa</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Impressão em massa de pedido kit','Quando ligado, pedidos de kit/múltiplos com composição idêntica podem ser impressos juntos.')}${switchToggleHtml('kzqc-single-bulk-toggle',state.singleBulkMassPrintEnabled,'Impressão em massa de pedido único','Quando desligado, bipar um SKU de Item Único imprime somente 1 pedido por vez, sem abrir o popup de quantidade.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">${state.activePickList?`Origem: ${escapeHtml(state.activePickList.pickListNo)}`:'Origem: Etiqueta não impressa'}</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters ${state.activePickList?'kzqc-hidden':''}"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
+    panel.innerHTML=`<div class="kzqc-header"><div class="kzqc-brand-wrap"><div class="kzqc-logo-mark">${KRYZER_LOGO_URL?`<img src="${escapeHtml(KRYZER_LOGO_URL)}" alt="Kryzer">`:'K'}</div><div><div class="kzqc-title">Checkout por produto</div><div class="kzqc-version">Kryzer Checkout · v${VERSION}</div></div></div><div class="kzqc-header-actions"><div class="kzqc-plugin-pill ${state.agentOnline?'online':''}"><span></span>${state.agentOnline?'Plugin conectado':'Plugin desconectado'}</div>${FULLSCREEN_MODE?'<button id="kzqc-close-fullscreen" class="kzqc-close-btn" title="Fechar">×</button>':`<button id="kzqc-minimize">${state.minimized?'▢':'—'}</button>`}</div></div>${state.minimized?'':`<div class="kzqc-body"><aside class="kzqc-sidebar"><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Configuração</div><label class="kzqc-label">Impressora</label><select id="kzqc-printer" class="kzqc-select" ${state.agentOnline?'':'disabled'}><option value="">Selecione...</option>${printerOptions}</select><button id="kzqc-agent-refresh" class="kzqc-side-action">Reconectar plugin</button></div><div class="kzqc-sidebar-section kzqc-priority-card"><div class="kzqc-section-title">Prioridade</div><div class="kzqc-fast-filters"><button id="kzqc-today-filter" class="${state.filters?.onlyToday?'active':''}">Vence hoje</button><button id="kzqc-priority-filter" class="${state.filters?.priorityFirst!==false?'active':''}">Prazo primeiro</button></div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Canais</div><div class="kzqc-channel-filters"><button class="kzqc-filter-btn ${Object.keys(channelSelectionMap()).length===0?'active':''}" data-channel="all"><span class="kzqc-all-channels">Todos</span></button>${CHANNELS.map(c=>`<button class="kzqc-filter-btn kzqc-logo-filter ${channelSelectionMap()[c.id]?'active':''}" data-channel="${c.id}" title="${escapeHtml(c.label)}">${channelButtonContent(c)}</button>`).join('')}</div></div><div class="kzqc-sidebar-section"><div class="kzqc-section-title">Impressão em massa</div>${switchToggleHtml('kzqc-bulk-toggle',state.bulkMassPrintEnabled,'Impressão em massa de pedido kit','Quando ligado, pedidos de kit/múltiplos com composição idêntica podem ser impressos juntos.')}${switchToggleHtml('kzqc-single-bulk-toggle',state.singleBulkMassPrintEnabled,'Impressão em massa de pedido único','Quando desligado, bipar um SKU de Item Único imprime somente 1 pedido por vez, sem abrir o popup de quantidade.')}</div>${state.lastPrinted?`<div class="kzqc-last"><div class="kzqc-last-title">Último impresso</div><div class="kzqc-last-body">${state.lastPrinted.image?`<img src="${escapeHtml(state.lastPrinted.image)}">`:'<div class="kzqc-last-placeholder"></div>'}<div class="kzqc-last-copy"><div class="kzqc-row-sku">${escapeHtml(state.lastPrinted.sku)}</div><div class="kzqc-row-name" title="${escapeHtml(state.lastPrinted.title||'')}">${escapeHtml(state.lastPrinted.title||'')}</div><div class="kzqc-last-orders">${escapeHtml((state.lastPrinted.orderNos||[]).slice(0,3).join(', '))}</div></div><div class="kzqc-last-qty">${Number(state.lastPrinted.quantity||0)}</div></div></div>`:''}<div class="kzqc-sidebar-section"><div class="kzqc-section-title">Ações</div><button id="kzqc-refresh" class="kzqc-side-action primary" ${state.refreshing||session?'disabled':''}>${state.refreshing?'Atualizando...':'Atualizar pedidos'}</button><button id="kzqc-separation-order" class="kzqc-side-action">Criar ordem de separação</button><button id="kzqc-history-button" class="kzqc-side-action">Impressos e reimpressão <b>${(state.printHistory||[]).length}</b></button><button id="kzqc-abnormal-button" class="kzqc-side-action">Pedidos anormais <b>${state.abnormalIds.length}</b></button><button id="kzqc-clear-print-blocks" class="kzqc-side-action" title="Limpa qualquer pedido preso em 'aguardando marcação' ou 'impressão em andamento' e atualiza a lista.">Limpar impressos pendentes</button><button id="kzqc-system-logs" class="kzqc-side-action">Logs do sistema <b>${(state.systemLogs||[]).length}</b></button><button id="kzqc-flight-logs" class="kzqc-side-action" title="Caixa-preta local persistente para diagnóstico de impressão.">Diagnóstico local <b>${(state.flightLogs||[]).length}</b></button><button id="kzqc-stock-shortage-button" class="kzqc-side-action" title="SKUs marcados sem estoque via -SKU*quantidade no campo de leitura.">Produtos sem estoque <b>${Object.keys(state.stockShortages||{}).length}</b></button></div>${FULLSCREEN_MODE?'':'<button id="kzqc-open-fullscreen">Abrir checkout em tela grande</button>'}</aside><main class="kzqc-main"><section class="kzqc-top-card"><div class="kzqc-top-copy"><div class="kzqc-eyebrow">Leitura rápida</div><h1>Escaneie o SKU para iniciar</h1><p>Os pedidos são separados por composição e impressos pelo plugin oficial do UpSeller.</p></div><div class="kzqc-queue-chip">${state.activePickList?`Origem: ${escapeHtml(state.activePickList.pickListNo)}`:'Origem: Etiqueta não impressa'}</div><div class="kzqc-scan-wrap"><div class="kzqc-scan-icon">⌁</div><input id="kzqc-scanner" autocomplete="off" placeholder="Escanear ou inserir SKU" ${state.loading?'disabled':''}><div class="kzqc-enter-key">ENTER</div></div><div class="kzqc-message ${state.messageType}">${escapeHtml(state.message)}</div></section><section class="kzqc-work-card"><div class="kzqc-tabs"><button class="kzqc-tab ${state.activeTab==='single1'?'active':''}" data-tab="single1"><span>Item Único</span><small>Quantidade = 1</small><b>${categoryCounts.single1}</b></button><button class="kzqc-tab ${state.activeTab==='singleMany'?'active':''}" data-tab="singleMany"><span>Item Único</span><small>Quantidade &gt; 1</small><b>${categoryCounts.singleMany}</b></button><button class="kzqc-tab ${state.activeTab==='multiple'?'active':''}" data-tab="multiple"><span>Múltiplos Itens</span><small>Mais de um SKU</small><b>${categoryCounts.multiple}</b></button></div>${categoryCounts.unknown?`<div id="kzqc-analysis-warning" class="kzqc-message warn" data-order-ids="${escapeHtml(unknownAnalysisIds.join('\n'))}" title="${escapeHtml(unknownAnalysisIds.length?unknownAnalysisIds.join(', '):'ID não identificado — consulte os logs')}">${categoryCounts.unknown} pedido(s) aguardando análise da composição.</div>`:''}<div class="kzqc-content-head"><div><div class="kzqc-content-title">${state.activeTab==='single1'?'Pedidos de item único':state.activeTab==='singleMany'?'Pedidos com várias unidades':'Pedidos com múltiplos itens'}</div><div class="kzqc-content-subtitle">1 clique abre ações; 2 cliques rápidos equivalem à bipagem.</div></div><div class="kzqc-total-pill">${state.activeTab==='single1'?single1Orders.length:state.activeTab==='singleMany'?singleManyOrders.length:multipleOrders.length} registros</div></div>${sessionHtml||`<div class="kzqc-list">${listHtml}</div>`}${state.pending?.orderIds?.length?`<div class="kzqc-pending"><b>${state.pending.orderIds.length} pedido(s) já impresso(s)</b><br>Falta confirmar a marcação.<button id="kzqc-retry-mark">Tentar marcar novamente</button></div>`:''}${state.stuckVoidedOrders?.length?`<div class="kzqc-pending kzqc-unknown-print"><b>${state.stuckVoidedOrders.length} pedido(s) com produto trocado, presos em Anulado</b><br>A troca de produto foi aplicada, mas não consegui redefinir automaticamente: ${escapeHtml(state.stuckVoidedOrders.map(e=>e.orderNo).join(', '))}.<button id="kzqc-retry-stuck-voided" style="margin-top:8px">Tentar redefinir novamente</button></div>`:''}</section></main><aside class="kzqc-right-queue"><div class="kzqc-right-head"><div class="kzqc-right-title">SKUs para separar</div><button id="kzqc-scope-toggle" class="kzqc-scope-toggle ${state.skuFilters?.currentTabOnly!==false?'active':''}" type="button" title="Ativado: mostra somente a aba atual. Desativado: soma todas as categorias.">${state.skuFilters?.currentTabOnly!==false?'Somente esta aba':'Todas as abas'}</button><button id="kzqc-rename-warehouses" type="button">Renomear armazéns</button></div><input id="kzqc-sku-filter" class="kzqc-sku-search" placeholder="Filtrar por SKU, nome ou use % como coringa" value="${escapeHtml(state.skuFilters?.query||'')}"><div class="kzqc-warehouse-filters ${state.activePickList?'kzqc-hidden':''}"><button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).length===0?'active':''}" data-warehouse="__ALL__">Todos armazéns</button>${warehouseOptions.map(name=>`<button class="kzqc-warehouse-btn ${(state.skuFilters?.warehouses||[]).includes(name)?'active':''}" data-warehouse="${escapeHtml(name)}">${escapeHtml(warehouseDisplayName(name))}</button>`).join('')}</div><div class="kzqc-queue-help"><strong>Pesquisa:</strong> ignora acentos e aceita <b>%</b> como coringa. Ex.: <b>5%06</b>.</div><div class="kzqc-sku-queue-list">${skuQueue.length?skuQueue.map(row=>`<button class="kzqc-sku-queue-row" data-abnormal-sku="${escapeHtml(row.sku)}" data-order-count="${row.orders}" data-search="${escapeHtml(`${row.sku} ${row.title||''} ${(row.warehouses||[]).map(warehouseDisplayName).join(' ')}`)}" title="Marcar ${escapeHtml(row.sku)} como anormal">${row.image?`<img src="${escapeHtml(row.image)}">`:'<span class="kzqc-img-placeholder"></span>'}<span class="kzqc-sku-queue-copy"><b>${escapeHtml(row.sku)}</b><small>${escapeHtml(row.title||'')}</small><em>${escapeHtml((row.warehouses||[]).map(warehouseDisplayName).join(' · '))}</em></span><span class="kzqc-sku-queue-qty">${row.qty}</span></button>`).join(''):'<div class="kzqc-empty">Nenhum SKU.</div>'}</div></aside></div>`}`;
     const analysisWarning=panel.querySelector('#kzqc-analysis-warning');
     if(analysisWarning){
       analysisWarning.ondblclick=async()=>{
@@ -4693,7 +4930,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       bindSingleDoubleClick(btn,()=>showOrderAbnormalModal(order,sku),()=>{if(!state.checkoutSession)startCheckout(order);setTimeout(()=>handleScan(sku),40)});
     });
     panel.querySelector('#kzqc-cancel-checkout')?.addEventListener('click',cancelCheckout); panel.querySelector('#kzqc-session-abnormal')?.addEventListener('click',()=>{const orders=(state.checkoutSession?.orderIds||[]).map(findOrderById).filter(Boolean);state.checkoutSession=null;markOrdersAbnormal(orders)}); panel.querySelector('#kzqc-print-scanned-only')?.addEventListener('click',printOnlyScanned);
-    panel.querySelector('#kzqc-refresh')?.addEventListener('click',()=>requestOrdersRefresh(true)); panel.querySelector('#kzqc-agent-refresh')?.addEventListener('click',()=>refreshAgent(true)); panel.querySelector('#kzqc-separation-order')?.addEventListener('click',showSeparationOrderModal); panel.querySelector('#kzqc-retry-mark')?.addEventListener('click',retryPendingMark); panel.querySelector('#kzqc-clear-print-blocks')?.addEventListener('click',clearAllPrintBlocks); panel.querySelector('#kzqc-system-logs')?.addEventListener('click',showSystemLogsModal);
+    panel.querySelector('#kzqc-refresh')?.addEventListener('click',()=>requestOrdersRefresh(true)); panel.querySelector('#kzqc-agent-refresh')?.addEventListener('click',()=>refreshAgent(true)); panel.querySelector('#kzqc-separation-order')?.addEventListener('click',showSeparationOrderModal); panel.querySelector('#kzqc-retry-mark')?.addEventListener('click',retryPendingMark); panel.querySelector('#kzqc-clear-print-blocks')?.addEventListener('click',clearAllPrintBlocks); panel.querySelector('#kzqc-system-logs')?.addEventListener('click',showSystemLogsModal); panel.querySelector('#kzqc-flight-logs')?.addEventListener('click',showFlightLogsModal);
     panel.querySelectorAll('.kzqc-overdue-row').forEach(b=>b.onclick=()=>{
       const order=findOrderById(b.dataset.orderId);
       if(!order){setMessage('Pedido atrasado não encontrado na lista atual (pode ter sido separado em outra aba/computador).','error');return;}
@@ -4876,6 +5113,32 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
     };
     startUi();
   }
+
+  if (!window.__KZ_FLIGHT_ERROR_HOOKS__) {
+    window.__KZ_FLIGHT_ERROR_HOOKS__ = true;
+    window.addEventListener('error', event => {
+      flightLog('window_error', {
+        message: event?.message || '',
+        source: event?.filename || '',
+        line: event?.lineno || 0,
+        column: event?.colno || 0,
+        stack: event?.error?.stack || '',
+      }, 'error', true);
+    });
+    window.addEventListener('unhandledrejection', event => {
+      const reason = event?.reason;
+      flightLog('unhandled_rejection', {
+        reason: reason?.message || String(reason || ''),
+        stack: reason?.stack || '',
+      }, 'error', true);
+    });
+  }
+
+  flightLog('checkout_runtime_boot', {
+    version: VERSION,
+    href: location.href,
+    previousRows: (state.flightLogs || []).length,
+  }, 'info', true);
 
   init();
 }
