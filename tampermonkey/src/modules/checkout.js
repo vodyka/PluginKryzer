@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.0.6';
+  const VERSION = '0.5.0.7';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -3037,19 +3037,36 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     finally { pluginConnectPromise = null; }
   }
 
-  async function refreshAgent() {
+  async function refreshAgent(forceReconnect = false) {
+    // O heartbeat roda a cada 20s. Ele NUNCA pode fechar o socket usado por um
+    // printMany em andamento, senão o retorno printProcess se perde e o checkout
+    // termina com 0 confirmações mesmo com o plugin aparecendo conectado.
+    if (state.loading || state.activePrintJob) {
+      if (forceReconnect) {
+        setMessage('Aguarde a impressão atual terminar antes de reconectar o plugin.', 'warn');
+        scheduleRender();
+      }
+      return;
+    }
+
     const wasOnline = state.agentOnline;
     const wasStatus = state.pluginStatus;
     try {
-      await connectPrintPlugin(true);
-      if (pluginSocket?.readyState === WebSocket.OPEN) pluginSend('getPrinter', null);
+      if (forceReconnect) {
+        await connectPrintPlugin(true);
+      } else if (pluginSocket?.readyState !== WebSocket.OPEN) {
+        await connectPrintPlugin(false);
+      }
+
+      if (pluginSocket?.readyState === WebSocket.OPEN) {
+        pluginSend('getPrinter', null);
+      }
     } catch (error) {
       state.agentOnline = false;
       state.pluginStatus = 'desconectado';
       console.warn('[KZ Checkout] plugin:', error);
     }
-    // Roda a cada 20s (agentTimer); só re-renderiza o painel inteiro se o status
-    // realmente mudou, senão vira mais uma fonte de reset de scroll periódico.
+
     if (state.agentOnline !== wasOnline || state.pluginStatus !== wasStatus) scheduleRender();
   }
 
@@ -4676,7 +4693,7 @@ const previousWindowScroll={x:window.scrollX,y:window.scrollY};    const previou
       bindSingleDoubleClick(btn,()=>showOrderAbnormalModal(order,sku),()=>{if(!state.checkoutSession)startCheckout(order);setTimeout(()=>handleScan(sku),40)});
     });
     panel.querySelector('#kzqc-cancel-checkout')?.addEventListener('click',cancelCheckout); panel.querySelector('#kzqc-session-abnormal')?.addEventListener('click',()=>{const orders=(state.checkoutSession?.orderIds||[]).map(findOrderById).filter(Boolean);state.checkoutSession=null;markOrdersAbnormal(orders)}); panel.querySelector('#kzqc-print-scanned-only')?.addEventListener('click',printOnlyScanned);
-    panel.querySelector('#kzqc-refresh')?.addEventListener('click',()=>requestOrdersRefresh(true)); panel.querySelector('#kzqc-agent-refresh')?.addEventListener('click',refreshAgent); panel.querySelector('#kzqc-separation-order')?.addEventListener('click',showSeparationOrderModal); panel.querySelector('#kzqc-retry-mark')?.addEventListener('click',retryPendingMark); panel.querySelector('#kzqc-clear-print-blocks')?.addEventListener('click',clearAllPrintBlocks); panel.querySelector('#kzqc-system-logs')?.addEventListener('click',showSystemLogsModal);
+    panel.querySelector('#kzqc-refresh')?.addEventListener('click',()=>requestOrdersRefresh(true)); panel.querySelector('#kzqc-agent-refresh')?.addEventListener('click',()=>refreshAgent(true)); panel.querySelector('#kzqc-separation-order')?.addEventListener('click',showSeparationOrderModal); panel.querySelector('#kzqc-retry-mark')?.addEventListener('click',retryPendingMark); panel.querySelector('#kzqc-clear-print-blocks')?.addEventListener('click',clearAllPrintBlocks); panel.querySelector('#kzqc-system-logs')?.addEventListener('click',showSystemLogsModal);
     panel.querySelectorAll('.kzqc-overdue-row').forEach(b=>b.onclick=()=>{
       const order=findOrderById(b.dataset.orderId);
       if(!order){setMessage('Pedido atrasado não encontrado na lista atual (pode ter sido separado em outra aba/computador).','error');return;}
@@ -4826,7 +4843,7 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
         }
       }, REFRESH_INTERVAL_MS);
 
-      agentTimer = setInterval(refreshAgent, 20000);
+      agentTimer = setInterval(() => refreshAgent(false), 20000);
     };
 
     const syncRouteUi = () => {
