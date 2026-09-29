@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.2';
+  const VERSION = '0.5.1.1';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -1606,7 +1606,6 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       version: VERSION,
       href: location.pathname + location.search,
       visibility: document.visibilityState,
-      hasFocus: document.hasFocus(),
       loading: Boolean(state.loading),
       agentOnline: Boolean(state.agentOnline),
       pluginStatus: state.pluginStatus,
@@ -3535,9 +3534,9 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       return;
     }
 
-    if (document.visibilityState !== 'visible' || !document.hasFocus()) {
-      releasePrintOwnership(document.visibilityState !== 'visible' ? 'tab_hidden' : 'window_blurred');
-      closePluginSocketForOwnership(document.visibilityState !== 'visible' ? 'tab_hidden' : 'window_blurred');
+    if (document.visibilityState !== 'visible') {
+      releasePrintOwnership('tab_hidden');
+      closePluginSocketForOwnership('tab_hidden');
       return;
     }
 
@@ -3929,12 +3928,6 @@ Isso NÃO chama mark-print novamente.`)) return;
       flightLog('execute_print_finally_before_unlock', {}, 'info', true);
       state.loading = false;
       flightLog('execute_print_unlocked', {}, 'info', true);
-
-      if (!document.hasFocus()) {
-        releasePrintOwnership('print_finished_window_blurred');
-        closePluginSocketForOwnership('print_finished_window_blurred');
-      }
-
       scheduleRender();
     }
   }
@@ -5411,62 +5404,17 @@ window.scrollTo(previousWindowScroll.x,previousWindowScroll.y);Object.entries(pr
       }, REFRESH_INTERVAL_MS);
 
       agentTimer = setInterval(() => {
-        if (document.visibilityState === 'visible' && document.hasFocus()) {
-          refreshAgent(false);
-        } else if (!state.loading && !state.activePrintJob && pluginSocket) {
-          releasePrintOwnership('heartbeat_not_focused');
-          closePluginSocketForOwnership('heartbeat_not_focused');
-        }
-      }, 3000);
+        if (document.visibilityState === 'visible') refreshAgent(false);
+      }, 5000);
 
       document.addEventListener('visibilitychange', () => {
-        flightLog('visibility_changed', {
-          visibility: document.visibilityState,
-          hasFocus: document.hasFocus(),
-        }, 'info', true);
-        if (document.visibilityState === 'visible' && document.hasFocus()) {
-          // Pequeno atraso dá tempo para outro navegador receber blur e liberar
-          // a única conexão aceita pelo UpSeller Printer.
-          setTimeout(() => {
-            if (document.visibilityState === 'visible' && document.hasFocus()) refreshAgent(false);
-          }, 250);
+        flightLog('visibility_changed', { visibility: document.visibilityState }, 'info', true);
+        if (document.visibilityState === 'visible') {
+          refreshAgent(false);
         } else if (!state.loading && !state.activePrintJob) {
           releasePrintOwnership('visibility_hidden');
           closePluginSocketForOwnership('visibility_hidden');
         }
-      });
-
-      window.addEventListener('focus', () => {
-        flightLog('window_focus', {
-          visibility: document.visibilityState,
-          hasFocus: document.hasFocus(),
-        }, 'info', true);
-
-        // Em navegadores/perfis diferentes não existe localStorage compartilhado.
-        // O foco da janela é o árbitro global natural: só a janela que o operador
-        // está usando mantém a conexão com localhost:21319.
-        setTimeout(() => {
-          if (document.visibilityState === 'visible' && document.hasFocus()) {
-            refreshAgent(false);
-          }
-        }, 300);
-      });
-
-      window.addEventListener('blur', () => {
-        flightLog('window_blur', {
-          visibility: document.visibilityState,
-          loading: state.loading,
-          hasActivePrintJob: Boolean(state.activePrintJob),
-        }, 'info', true);
-
-        // Nunca corta uma etiqueta que já está sendo processada. Assim que o job
-        // terminar, executePrint.finally libera o socket se a janela continuar sem foco.
-        setTimeout(() => {
-          if (!document.hasFocus() && !state.loading && !state.activePrintJob) {
-            releasePrintOwnership('window_blur');
-            closePluginSocketForOwnership('window_blur');
-          }
-        }, 120);
       });
 
       window.addEventListener('storage', event => {
