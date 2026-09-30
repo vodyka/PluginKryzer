@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.18.23
+// @version      2.18.24
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -18,7 +18,10 @@
 // @connect      upseller.cn
 // @connect      image-product-upload.upseller.cn
 // @connect      image-product.upseller.cn
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.18.23
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout.js?v=2.18.24
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/packaging.js?v=2.18.24
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado-v2.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.18.3
@@ -39,6 +42,8 @@
 //
 // Ao editar um módulo, suba também o número (?v=2.18.3) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.18.24 (2026-09-30): checkout 0.5.1.3 adiciona integração opcional de embalagens/cobrança com Google Sheets, isolada do Print Plugin.
 //
 // v2.18.17 (2026-09-29): checkout 0.5.0.7 impede o heartbeat de 20s de reiniciar o WebSocket durante impressão; reconexão forçada fica apenas no botão manual.
 // 
