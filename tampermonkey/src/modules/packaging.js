@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -273,7 +273,7 @@
 
         <div class="kzpkg-field">
           <label>API_TOKEN do Google Apps Script</label>
-          <input id="kzpkg-token" type="password" autocomplete="off" value="${escapeHtml(cfg.token || '')}" placeholder="Cole a chave configurada nas Propriedades do Script">
+          <input id="kzpkg-token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" name="kz_packaging_api_token_${Date.now()}" data-lpignore="true" data-1p-ignore="true" value="${escapeHtml(cfg.token || '')}" placeholder="Cole a chave configurada nas Propriedades do Script">
         </div>
 
         <div id="kzpkg-settings-status" class="kzpkg-status">
@@ -288,9 +288,9 @@
         </div>
 
         <div class="kzpkg-actions">
-          <button id="kzpkg-close">Fechar</button>
-          <button id="kzpkg-refresh">Atualizar cadastros</button>
-          <button id="kzpkg-test" class="primary">Testar e salvar</button>
+          <button id="kzpkg-close" type="button">Fechar</button>
+          <button id="kzpkg-refresh" type="button">Atualizar cadastros</button>
+          <button id="kzpkg-test" type="button" class="primary">Testar e salvar</button>
         </div>
       </div>
     `;
@@ -333,6 +333,17 @@
       }
     };
     modal.addEventListener('click', event => { if (event.target === modal) closeModal(); });
+    modal.addEventListener('submit', event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    modal.querySelector('#kzpkg-token')?.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        event.stopPropagation();
+        modal.querySelector('#kzpkg-test')?.click();
+      }
+    });
   }
 
   function choosePackagingModal(packages, analysis, mapped) {
@@ -375,8 +386,8 @@
             <a href="${SHEET_URL}#gid=${PACKAGING_GID}" target="_blank" rel="noopener">Cadastrar/editar embalagens</a>
           </div>
           <div class="kzpkg-actions">
-            <button id="kzpkg-cancel">Cancelar impressão</button>
-            <button id="kzpkg-confirm" class="primary">Confirmar embalagem e imprimir</button>
+            <button id="kzpkg-cancel" type="button">Cancelar impressão</button>
+            <button id="kzpkg-confirm" type="button" class="primary">Confirmar embalagem e imprimir</button>
           </div>
         </div>
       `;
@@ -594,8 +605,13 @@
     if (!button) {
       button = document.createElement('button');
       button.id = 'kzpkg-settings-button';
+      button.type = 'button';
       button.className = 'kzqc-side-action';
-      button.addEventListener('click', showSettingsModal);
+      button.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        showSettingsModal();
+      });
       actions.appendChild(button);
     }
 
