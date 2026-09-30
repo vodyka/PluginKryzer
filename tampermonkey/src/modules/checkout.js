@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.1';
+  const VERSION = '0.5.1.3';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -3997,6 +3997,31 @@ Isso NÃO chama mark-print novamente.`)) return;
 
     const selectedOrders = group.orders.slice(0, qty);
     const displayLabel = group.label || group.sku || selectedOrders[0]?.orderNo || 'pedido';
+
+    // Integração opcional de embalagem/cobrança. Fica fora do fluxo crítico do
+    // Print Plugin: apenas valida a embalagem antes de state.loading/printMany.
+    const packagingApi = globalThis.KryzerPackaging;
+    let packagingContext = null;
+    if (packagingApi?.preparePrint) {
+      try {
+        setMessage('Validando embalagem do pedido...', 'info');
+        const currentPuid = await getPluginPuid();
+        packagingContext = await packagingApi.preparePrint({
+          orders: selectedOrders,
+          group,
+          puid: currentPuid || state.pluginPuid || 0,
+          printer: state.printer,
+          checkoutVersion: VERSION,
+        });
+      } catch (error) {
+        const message = error?.message || String(error);
+        setMessage(message, /cancelad/i.test(message) ? 'warn' : 'error');
+        scheduleRender();
+        setTimeout(focusScanner, 40);
+        return false;
+      }
+    }
+
     state.loading = true;
     setMessage(`Enviando ${selectedOrders.length} etiqueta(s) ao plugin oficial...`, 'info');
     scheduleRender();
@@ -4017,6 +4042,21 @@ Isso NÃO chama mark-print novamente.`)) return;
       const now = new Date().toISOString();
 
       const successfulOrders = selectedOrders.filter(order => successSet.has(norm(order.idStr)));
+
+      // Registra cobrança/embalagem somente depois de printSuccess. A gravação é
+      // assíncrona e possui fila local no módulo de embalagens, então nunca bloqueia
+      // mark-print nem a liberação do scanner.
+      if (successfulOrders.length && packagingContext && !packagingContext.disabled && packagingApi?.recordSuccessfulPrints) {
+        Promise.resolve(packagingApi.recordSuccessfulPrints({
+          successfulOrders,
+          context: packagingContext,
+          checkoutVersion: VERSION,
+          printer: state.printer,
+        })).catch(error => {
+          console.warn('[KZ Checkout] embalagem/cobrança:', error);
+        });
+      }
+
       successfulOrders.forEach((order, index) => {
         const detail = printResult.success.find(row => row.orderId === norm(order.idStr))?.detail || {};
         addPrintHistory({
