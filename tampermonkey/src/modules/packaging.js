@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -676,9 +676,9 @@
   }
 
   function startUiObserver() {
-    // Delegado em capture: abre as configurações antes de qualquer handler do
-    // UpSeller/checkout tentar focar o scanner ou interpretar o clique.
-    document.addEventListener('click', event => {
+    // Pointerdown no window/capture acontece antes dos handlers normais do
+    // UpSeller. Assim o clique nunca chega ao scanner/formulários da página.
+    window.addEventListener('pointerdown', event => {
       const button = event.target?.closest?.('#kzpkg-settings-button');
       if (!button) return;
       event.preventDefault();
