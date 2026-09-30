@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.1';
+  const VERSION = '0.1.2';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -29,6 +29,46 @@
   let bootstrapPromise = null;
   let flushPromise = null;
   let injectTimer = null;
+  let scannerAutofillGuard = null;
+
+  function releaseScannerAutofillGuard() {
+    const guard = scannerAutofillGuard;
+    scannerAutofillGuard = null;
+    if (!guard) return;
+    clearInterval(guard.timer);
+    const input = guard.input;
+    if (!input || !input.isConnected) return;
+    input.readOnly = guard.readOnly;
+    if (guard.autocomplete == null) input.removeAttribute('autocomplete');
+    else input.setAttribute('autocomplete', guard.autocomplete);
+    // Enquanto o modal está aberto o scanner fica coberto pela overlay, então
+    // qualquer alteração nele é autofill do navegador/password manager.
+    if (input.value !== guard.value) input.value = guard.value;
+  }
+
+  function protectScannerFromCredentialAutofill() {
+    releaseScannerAutofillGuard();
+    const input = document.getElementById('kzqc-scanner');
+    if (!input) return;
+    const guard = {
+      input,
+      value: input.value,
+      readOnly: input.readOnly,
+      autocomplete: input.getAttribute('autocomplete'),
+      timer: null,
+    };
+    try { input.blur(); } catch {}
+    input.readOnly = true;
+    input.setAttribute('autocomplete', 'one-time-code');
+    guard.timer = setInterval(() => {
+      if (!document.getElementById('kzpkg-modal') || !input.isConnected) {
+        releaseScannerAutofillGuard();
+        return;
+      }
+      if (input.value !== guard.value) input.value = guard.value;
+    }, 80);
+    scannerAutofillGuard = guard;
+  }
 
   const nowIso = () => new Date().toISOString();
   const norm = value => String(value == null ? '' : value).trim();
@@ -230,7 +270,7 @@
       #kzpkg-modal button{border:1px solid #d9d9d9;background:#fff;border-radius:6px;padding:9px 14px;cursor:pointer;font-weight:600}
       #kzpkg-modal button.primary{background:#0049e5;border-color:#0049e5;color:#fff}
       #kzpkg-modal button.danger{color:#b42318}
-      #kzpkg-modal input[type=password],#kzpkg-modal input[type=text]{width:100%;height:40px;border:1px solid #d9d9d9;border-radius:6px;padding:0 10px;box-sizing:border-box}
+      #kzpkg-modal input[type=password],#kzpkg-modal input[type=text],#kzpkg-modal textarea{width:100%;height:40px;border:1px solid #d9d9d9;border-radius:6px;padding:9px 10px;box-sizing:border-box;font:inherit;resize:none;overflow:hidden}
       #kzpkg-modal .kzpkg-field{margin:12px 0}
       #kzpkg-modal .kzpkg-field label{display:block;font-size:12px;font-weight:600;margin-bottom:6px}
       #kzpkg-modal .kzpkg-check{display:flex;align-items:center;gap:8px;padding:12px 2px;font-size:12px}
@@ -251,12 +291,14 @@
 
   function closeModal() {
     document.getElementById('kzpkg-modal')?.remove();
+    releaseScannerAutofillGuard();
   }
 
   function showSettingsModal() {
     ensureStyles();
     closeModal();
     const cfg = getConfig();
+    protectScannerFromCredentialAutofill();
     const cache = getCache();
     const queue = getQueue();
     const modal = document.createElement('div');
@@ -273,7 +315,7 @@
 
         <div class="kzpkg-field">
           <label>API_TOKEN do Google Apps Script</label>
-          <input id="kzpkg-token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" name="kz_packaging_api_token_${Date.now()}" data-lpignore="true" data-1p-ignore="true" value="${escapeHtml(cfg.token || '')}" placeholder="Cole a chave configurada nas Propriedades do Script">
+          <textarea id="kzpkg-token" rows="1" readonly autocomplete="new-password" autocapitalize="off" spellcheck="false" name="kz_packaging_secret_${Date.now()}" data-lpignore="true" data-1p-ignore="true" data-form-type="other" placeholder="Cole a chave configurada nas Propriedades do Script">${escapeHtml(cfg.token || '')}</textarea>
         </div>
 
         <div id="kzpkg-settings-status" class="kzpkg-status">
@@ -297,6 +339,17 @@
     document.body.appendChild(modal);
 
     const status = modal.querySelector('#kzpkg-settings-status');
+    const tokenField = modal.querySelector('#kzpkg-token');
+    // O campo nasce readonly para o Chrome não montar um par usuário/senha com
+    // o scanner do checkout. Ele só é liberado por interação real do usuário.
+    const unlockTokenField = event => {
+      if (!event?.isTrusted) return;
+      tokenField.readOnly = false;
+    };
+    tokenField?.addEventListener('pointerdown', unlockTokenField, { once: true });
+    tokenField?.addEventListener('keydown', event => {
+      if (tokenField.readOnly && event.isTrusted) tokenField.readOnly = false;
+    }, { once: true });
     modal.querySelector('#kzpkg-close').onclick = closeModal;
     modal.querySelector('#kzpkg-test').onclick = async () => {
       const token = norm(modal.querySelector('#kzpkg-token').value);
@@ -607,11 +660,7 @@
       button.id = 'kzpkg-settings-button';
       button.type = 'button';
       button.className = 'kzqc-side-action';
-      button.addEventListener('click', event => {
-        event.preventDefault();
-        event.stopPropagation();
-        showSettingsModal();
-      });
+      button.tabIndex = -1;
       actions.appendChild(button);
     }
 
@@ -627,6 +676,16 @@
   }
 
   function startUiObserver() {
+    // Delegado em capture: abre as configurações antes de qualquer handler do
+    // UpSeller/checkout tentar focar o scanner ou interpretar o clique.
+    document.addEventListener('click', event => {
+      const button = event.target?.closest?.('#kzpkg-settings-button');
+      if (!button) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showSettingsModal();
+    }, true);
+
     const run = () => {
       clearTimeout(injectTimer);
       injectTimer = setTimeout(updateSidebarButton, 80);
