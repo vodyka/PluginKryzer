@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.6';
+  const VERSION = '0.5.1.7';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4042,8 +4042,9 @@ Isso NÃO chama mark-print novamente.`)) return;
         return false;
       }
 
-    if (!packagingContext || packagingContext.disabled) {
-      setMessage('Confirmação de embalagem não concluída. Impressão bloqueada.', 'error');
+    if (!packagingContext || packagingContext.disabled || !packagingContext.packaging?.id) {
+      const pkgVersion = packagingApi?.version || 'desconhecida';
+      setMessage(`Confirmação de embalagem não concluída (módulo ${pkgVersion}). Impressão bloqueada.`, 'error');
       scheduleRender();
       setTimeout(focusScanner, 40);
       return false;
