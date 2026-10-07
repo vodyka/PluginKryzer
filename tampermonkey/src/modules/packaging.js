@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.6';
+  const VERSION = '0.1.7';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -557,33 +557,39 @@
 
   async function preparePrint(input) {
     const cfg = getConfig();
-    if (!cfg.enabled) return { disabled: true, version: VERSION };
+
+    // Neste checkout a embalagem é obrigatória. O toggle de configuração não
+    // pode mais criar um caminho silencioso que imprime sem confirmar.
     if (!cfg.token) {
       showSettingsModal();
-      throw new Error('Controle de embalagens ativo, mas o API_TOKEN ainda não foi configurado.');
+      throw new Error('API_TOKEN de embalagens não configurado. Impressão bloqueada.');
     }
 
     const orders = Array.isArray(input?.orders) ? input.orders : [];
     if (!orders.length) throw new Error('Não encontrei pedidos para vincular à embalagem.');
 
-    // O checkout não pode ficar parado esperando o Google Sheets a cada bipe.
-    // Se já existe catálogo em cache (mesmo vencido), usa imediatamente e
-    // atualiza em segundo plano. Só consulta a rede de forma bloqueante quando
-    // ainda não existe nenhuma embalagem local.
-    const cached = getCache();
-    let cache = cached;
-    let packages = activePackaging(cache);
-    if (packages.length) {
-      const stale = Date.now() - Number(cache?.at || 0) >= CACHE_TTL_MS;
-      if (stale) {
-        bootstrap(true).catch(error => console.warn('[KZ Packaging] refresh em background:', error));
+    // Tenta atualizar a planilha a cada bipagem, mas com limite curto.
+    // Se o Google responder rápido, as novas embalagens entram na hora.
+    // Se demorar/falhar, usa o cache local e abre o modal mesmo assim.
+    let cache = getCache();
+    let freshUsed = false;
+    try {
+      const fresh = await Promise.race([
+        bootstrap(true),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('refresh-timeout')), 2500)),
+      ]);
+      if (fresh) {
+        cache = fresh;
+        freshUsed = true;
       }
-    } else {
-      cache = await bootstrap(true);
-      packages = activePackaging(cache);
+    } catch (error) {
+      console.warn('[KZ Packaging] atualização rápida indisponível; usando cache local:', error);
     }
+
+    let packages = activePackaging(cache);
     if (!packages.length) {
-      throw new Error('Nenhuma embalagem ativa cadastrada na planilha. Cadastre uma embalagem e atualize os cadastros.');
+      // Sem cache não existe escolha segura: bloqueia em vez de imprimir.
+      throw new Error('Nenhuma embalagem disponível no cache e a planilha não respondeu. Abra Embalagens e clique em Atualizar cadastros.');
     }
 
     const analysis = analyzeOrders(orders);
@@ -596,6 +602,13 @@
     // Mesmo quando o SKU possui embalagem fixa, o operador precisa confirmar
     // qual embalagem foi realmente usada. O mapeamento serve apenas para
     // pré-selecionar a opção no modal — nunca para imprimir automaticamente.
+    console.log('[KZ Packaging] preparePrint', {
+      version: VERSION,
+      freshUsed,
+      packageCount: packages.length,
+      cacheAt: cache?.at || null,
+      sku: analysis.sku || '',
+    });
     const result = await choosePackagingModal(packages, analysis, mapping);
     const context = {
       version: VERSION,
