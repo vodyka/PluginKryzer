@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -22,6 +22,7 @@
   const LS_QUEUE = 'kz_packaging_queue_backup_v1';
   const CACHE_TTL_MS = 5 * 60 * 1000;
   const MAX_QUEUE = 3000;
+  const SYSTEM_REPRINT_PACKAGING_ID = 'SYS-REPRINT-LABEL';
 
   const DEFAULT_CONFIG = {
     enabled: false,
@@ -245,7 +246,14 @@
   }
 
   function activePackaging(cache) {
-    return (cache?.packaging || []).filter(row => row && row.id && row.active !== false);
+    return (cache?.packaging || []).filter(row =>
+      row && row.id && row.active !== false && !norm(row.id).startsWith('SYS-')
+    );
+  }
+
+  function rawPackagingById(cache, id) {
+    const target = norm(id);
+    return (cache?.packaging || []).find(row => norm(row?.id) === target) || null;
   }
 
   function mappingForSku(cache, sku) {
@@ -674,25 +682,110 @@
     return context;
   }
 
+  async function prepareReprint(input) {
+    const orders = Array.isArray(input?.orders) ? input.orders : [];
+    if (!orders.length) throw new Error('Não encontrei o pedido da reimpressão.');
+
+    const cfg = getConfig();
+    let cache = getCache();
+    if (cfg.token) {
+      try {
+        const fresh = await Promise.race([
+          bootstrap(true),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('refresh-timeout')), 2500)),
+        ]);
+        if (fresh) cache = fresh;
+      } catch (error) {
+        console.warn('[KZ Packaging] reimpressão usando cache local:', error);
+      }
+    }
+
+    const analysis = analyzeOrders(orders);
+    const puid = norm(input?.puid);
+    const account = norm(orders[0]?.shopName);
+    const reasonCode = norm(input?.reasonCode || 'other');
+    const reasonLabel = norm(input?.reasonLabel || 'Outro');
+    const requiresPackaging = Boolean(input?.requiresPackaging);
+
+    if (!requiresPackaging) {
+      const systemPackage = rawPackagingById(cache, SYSTEM_REPRINT_PACKAGING_ID) || {
+        id: SYSTEM_REPRINT_PACKAGING_ID,
+        name: 'Reimpressão de etiqueta (sem nova embalagem)',
+        packagingSku: '',
+        cost: 0,
+        weightG: 0,
+        lengthCm: 0,
+        widthCm: 0,
+        heightCm: 0,
+        active: true,
+      };
+      return {
+        version: VERSION,
+        disabled: false,
+        eventType: 'REPRINT_LABEL',
+        reprintReasonCode: reasonCode,
+        reprintReasonLabel: reasonLabel,
+        chargeOperation: false,
+        chargePackaging: false,
+        packaging: systemPackage,
+        selectionOrigin: 'REPRINT_LABEL',
+        analysis,
+        puid,
+        account,
+        preparedAt: nowIso(),
+      };
+    }
+
+    const packages = activePackaging(cache);
+    if (!packages.length) {
+      throw new Error('Nenhuma embalagem disponível para registrar a reembalagem.');
+    }
+    const mapping = analysis.fixedEligible ? mappingForSku(cache, analysis.sku) : null;
+    const result = await choosePackagingModal(packages, analysis, mapping);
+    return {
+      version: VERSION,
+      disabled: false,
+      eventType: 'REPACKAGE',
+      reprintReasonCode: reasonCode,
+      reprintReasonLabel: reasonLabel,
+      chargeOperation: false,
+      chargePackaging: true,
+      packaging: result.selected,
+      selectionOrigin: 'REPACKAGE',
+      analysis,
+      puid,
+      account,
+      preparedAt: nowIso(),
+    };
+  }
+
   function operationPayload(order, context, checkoutVersion) {
     const items = normalizeItems(order);
     const puid = norm(context?.puid);
     const orderId = norm(order?.idStr);
+    const eventType = norm(context?.eventType || 'ORIGINAL');
+    const eventId = 'OP-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    const noteParts = [];
+    if (context?.analysis?.orderCount > 1) noteParts.push(`Lote de ${context.analysis.orderCount} pedido(s)`);
+    if (context?.reprintReasonLabel) noteParts.push(`Motivo: ${norm(context.reprintReasonLabel)}`);
     return {
       action: 'logOperation',
-      eventId: 'OP-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2, 8).toUpperCase(),
-      idempotencyKey: [puid, orderId, 'ORIGINAL'].join('|'),
+      eventId,
+      idempotencyKey: eventType === 'ORIGINAL'
+        ? [puid, orderId, 'ORIGINAL'].join('|')
+        : [puid, orderId, eventType, eventId].join('|'),
       puid,
       account: norm(order?.shopName || context?.account),
       marketplace: norm(order?.channel),
       orderId,
       orderNo: norm(order?.orderNo),
-      orderType: norm(order?.category),
+      orderType: eventType === 'ORIGINAL' ? norm(order?.category) : eventType,
       skus: items,
       packagingId: norm(context?.packaging?.id),
       selectionOrigin: norm(context?.selectionOrigin || 'MANUAL'),
+      operationValue: eventType === 'ORIGINAL' ? undefined : 0,
       checkoutVersion: norm(checkoutVersion),
-      notes: context?.analysis?.orderCount > 1 ? `Lote de ${context.analysis.orderCount} pedido(s)` : '',
+      notes: noteParts.join(' · '),
     };
   }
 
@@ -778,6 +871,7 @@
     endpoint: API_URL,
     sheetUrl: SHEET_URL,
     preparePrint,
+    prepareReprint,
     recordSuccessfulPrints,
     showSettings: showSettingsModal,
     refresh: () => bootstrap(true),
