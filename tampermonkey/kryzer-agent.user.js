@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.18.36
+// @version      2.18.37
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -20,8 +20,8 @@
 // @connect      image-product.upseller.cn
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/12e50a77e92d0e3f0aa0989ac8c03a4888bc6296/tampermonkey/src/modules/checkout.js
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/65f13162abe0583a9e5e200c8c738712a46833e8/tampermonkey/src/modules/packaging.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/7f6ffbfbbda00c3f4e101b2849bf2109733d0179/tampermonkey/src/modules/checkout.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/7646dc270fef0cf402f18631d24dc928eb9b3b08/tampermonkey/src/modules/packaging.js
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado-v2.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.18.3
@@ -42,6 +42,8 @@
 //
 // Ao editar um módulo, suba também o número (?v=2.18.3) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.18.37 (2026-10-07): remove o MutationObserver da sidebar, renderiza o status de Embalagens diretamente no Checkout e força o modal visível acima de qualquer CSS da página.
 //
 // v2.18.36 (2026-10-07): corrige modo tela cheia que escondia o modal #kzpkg-modal; seleção de embalagem volta a aparecer antes da impressão.
 //
