@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.5';
+  const VERSION = '0.5.1.6';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4002,8 +4002,18 @@ Isso NÃO chama mark-print novamente.`)) return;
     // Print Plugin: apenas valida a embalagem antes de state.loading/printMany.
     const packagingApi = globalThis.KryzerPackaging;
     let packagingContext = null;
-    if (packagingApi?.preparePrint) {
-      try {
+
+    // Se o controle de embalagem estiver presente/ativo, a impressão não pode
+    // seguir por um caminho que ignore a confirmação. E se o módulo esperado
+    // não estiver carregado, falha fechado em vez de imprimir silenciosamente.
+    if (!packagingApi?.preparePrint || !packagingApi?.version) {
+      setMessage('Módulo de embalagens não carregado corretamente. Impressão bloqueada para evitar saída sem confirmação de embalagem.', 'error');
+      scheduleRender();
+      setTimeout(focusScanner, 40);
+      return false;
+    }
+
+    try {
         setMessage('Validando embalagem do pedido...', 'info');
 
         // A identificação do PUID não pode bloquear a bipagem. Em algumas sessões
@@ -4031,6 +4041,12 @@ Isso NÃO chama mark-print novamente.`)) return;
         setTimeout(focusScanner, 40);
         return false;
       }
+
+    if (!packagingContext || packagingContext.disabled) {
+      setMessage('Confirmação de embalagem não concluída. Impressão bloqueada.', 'error');
+      scheduleRender();
+      setTimeout(focusScanner, 40);
+      return false;
     }
 
     state.loading = true;
