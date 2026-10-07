@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.4';
+  const VERSION = '0.5.1.5';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4005,11 +4005,22 @@ Isso NÃO chama mark-print novamente.`)) return;
     if (packagingApi?.preparePrint) {
       try {
         setMessage('Validando embalagem do pedido...', 'info');
-        const currentPuid = await getPluginPuid();
+
+        // A identificação do PUID não pode bloquear a bipagem. Em algumas sessões
+        // o /api/home fica pendente e deixava o checkout eternamente em
+        // "Validando embalagem do pedido...". Usa o PUID já conhecido e atualiza
+        // em background para os próximos registros.
+        const currentPuid = Number(state.pluginPuid || 0);
+        if (!currentPuid) {
+          Promise.resolve(getPluginPuid()).catch(error => {
+            console.warn('[KZ Checkout] PUID em background:', error);
+          });
+        }
+
         packagingContext = await packagingApi.preparePrint({
           orders: selectedOrders,
           group,
-          puid: currentPuid || state.pluginPuid || 0,
+          puid: currentPuid,
           printer: state.printer,
           checkoutVersion: VERSION,
         });
