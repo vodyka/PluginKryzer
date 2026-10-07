@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.9';
+  const VERSION = '0.2.0';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -326,6 +326,16 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
+  function forceModalVisible(modal) {
+    if (!modal) return;
+    modal.style.setProperty('display', 'flex', 'important');
+    modal.style.setProperty('position', 'fixed', 'important');
+    modal.style.setProperty('inset', '0', 'important');
+    modal.style.setProperty('z-index', '2147483647', 'important');
+    modal.style.setProperty('visibility', 'visible', 'important');
+    modal.style.setProperty('opacity', '1', 'important');
+  }
+
   function closeModal() {
     document.getElementById('kzpkg-modal')?.remove();
     releaseScannerAutofillGuard();
@@ -374,6 +384,7 @@
       </div>
     `;
     document.body.appendChild(modal);
+    forceModalVisible(modal);
 
     const status = modal.querySelector('#kzpkg-settings-status');
     const tokenField = modal.querySelector('#kzpkg-token');
@@ -482,6 +493,7 @@
         </div>
       `;
       document.body.appendChild(modal);
+      forceModalVisible(modal);
 
       modal.querySelector('#kzpkg-cancel').onclick = () => {
         closeModal();
@@ -740,20 +752,10 @@
       showSettingsModal();
     }, true);
 
-    // O botão agora nasce dentro do próprio render do checkout. O observer só
-    // atualiza o texto quando a sidebar é redesenhada; ele não cria/remove DOM.
-    const run = () => {
-      clearTimeout(injectTimer);
-      injectTimer = setTimeout(updateSidebarButton, 80);
-    };
-    run();
-    const observer = new MutationObserver(mutations => {
-      if (!mutations.some(m => Array.from(m.addedNodes || []).some(node =>
-        node?.nodeType === 1 && (node.id === 'kzpkg-settings-button' || node.querySelector?.('#kzpkg-settings-button'))
-      ))) return;
-      run();
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    // O Checkout agora renderiza o texto correto do botão diretamente.
+    // Não usamos mais MutationObserver para editar a sidebar: isso era a causa
+    // do efeito de piscar/sumir/voltar.
+    updateSidebarButton();
   }
 
   try {
@@ -780,11 +782,15 @@
     showSettings: showSettingsModal,
     refresh: () => bootstrap(true),
     flushQueue,
-    status: () => ({
-      config: { ...getConfig(), token: getConfig().token ? '***' : '' },
-      cache: getCache(),
-      pending: getQueue().length,
-    }),
+    status: () => {
+      const cfg = getConfig();
+      return {
+        config: { ...cfg, token: cfg.token ? '***' : '' },
+        hasToken: Boolean(cfg.token),
+        cache: getCache(),
+        pending: getQueue().length,
+      };
+    },
   };
 
   if (document.documentElement) startUiObserver();
