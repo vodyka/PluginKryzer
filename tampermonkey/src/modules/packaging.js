@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.7';
+  const VERSION = '0.1.8';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -558,37 +558,35 @@
   async function preparePrint(input) {
     const cfg = getConfig();
 
-    // Neste checkout a embalagem é obrigatória. O toggle de configuração não
-    // pode mais criar um caminho silencioso que imprime sem confirmar.
-    if (!cfg.token) {
-      showSettingsModal();
-      throw new Error('API_TOKEN de embalagens não configurado. Impressão bloqueada.');
-    }
-
     const orders = Array.isArray(input?.orders) ? input.orders : [];
     if (!orders.length) throw new Error('Não encontrei pedidos para vincular à embalagem.');
 
-    // Tenta atualizar a planilha a cada bipagem, mas com limite curto.
-    // Se o Google responder rápido, as novas embalagens entram na hora.
-    // Se demorar/falhar, usa o cache local e abre o modal mesmo assim.
+    // Se houver token, tenta atualizar a planilha com limite curto.
+    // Sem token, continua operando com o cache local e exige confirmação manual.
     let cache = getCache();
     let freshUsed = false;
-    try {
-      const fresh = await Promise.race([
-        bootstrap(true),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('refresh-timeout')), 2500)),
-      ]);
-      if (fresh) {
-        cache = fresh;
-        freshUsed = true;
+    if (cfg.token) {
+      try {
+        const fresh = await Promise.race([
+          bootstrap(true),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('refresh-timeout')), 2500)),
+        ]);
+        if (fresh) {
+          cache = fresh;
+          freshUsed = true;
+        }
+      } catch (error) {
+        console.warn('[KZ Packaging] atualização rápida indisponível; usando cache local:', error);
       }
-    } catch (error) {
-      console.warn('[KZ Packaging] atualização rápida indisponível; usando cache local:', error);
     }
 
     let packages = activePackaging(cache);
     if (!packages.length) {
       // Sem cache não existe escolha segura: bloqueia em vez de imprimir.
+      if (!cfg.token) {
+        showSettingsModal();
+        throw new Error('Nenhuma embalagem disponível no cache. Configure o API_TOKEN para carregar o cadastro da planilha.');
+      }
       throw new Error('Nenhuma embalagem disponível no cache e a planilha não respondeu. Abra Embalagens e clique em Atualizar cadastros.');
     }
 
@@ -672,25 +670,18 @@
     const actions = panel.querySelector('#kzqc-flight-logs')?.parentElement || panel.querySelector('.kzqc-sidebar .kzqc-sidebar-section:last-of-type');
     if (!actions) return;
 
-    let button = panel.querySelector('#kzpkg-settings-button');
-    if (!button) {
-      button = document.createElement('button');
-      button.id = 'kzpkg-settings-button';
-      button.type = 'button';
-      button.className = 'kzqc-side-action';
-      button.tabIndex = -1;
-      actions.appendChild(button);
-    }
+    const button = panel.querySelector('#kzpkg-settings-button');
+    if (!button) return;
 
     const cfg = getConfig();
     const queue = getQueue();
     const cache = getCache();
     const count = activePackaging(cache).length;
     const isActive = Boolean(cfg.enabled);
-    const nextHtml = `Embalagens <b>${isActive ? (queue.length ? queue.length + ' pend.' : count + ' cad.') : 'off'}</b>`;
-    const nextTitle = isActive
-      ? `Controle de embalagem ativo · módulo v${VERSION}. Clique para configurar.`
-      : `Controle de embalagem desligado · módulo v${VERSION}. Clique para configurar.`;
+    const nextHtml = `Embalagens <b>${queue.length ? queue.length + ' pend.' : count + ' cad.'}${cfg.token ? '' : ' · cache'}</b>`;
+    const nextTitle = cfg.token
+      ? `Controle de embalagem · módulo v${VERSION}. Cadastro sincronizável.`
+      : `Controle de embalagem · módulo v${VERSION}. Sem API_TOKEN: usando somente cache local.`;
 
     // Evita feedback infinito do MutationObserver: só toca no DOM quando o
     // estado visual realmente mudou.
@@ -712,12 +703,19 @@
       showSettingsModal();
     }, true);
 
+    // O botão agora nasce dentro do próprio render do checkout. O observer só
+    // atualiza o texto quando a sidebar é redesenhada; ele não cria/remove DOM.
     const run = () => {
       clearTimeout(injectTimer);
       injectTimer = setTimeout(updateSidebarButton, 80);
     };
     run();
-    const observer = new MutationObserver(run);
+    const observer = new MutationObserver(mutations => {
+      if (!mutations.some(m => Array.from(m.addedNodes || []).some(node =>
+        node?.nodeType === 1 && (node.id === 'kzpkg-settings-button' || node.querySelector?.('#kzpkg-settings-button'))
+      ))) return;
+      run();
+    });
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
