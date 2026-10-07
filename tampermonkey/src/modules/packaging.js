@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.4';
+  const VERSION = '0.1.5';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -593,26 +593,17 @@
     const puid = norm(input?.puid);
     const account = norm(orders[0]?.shopName);
 
-    if (fixedPackage && analysis.fixedEligible) {
-      const context = {
-        version: VERSION,
-        disabled: false,
-        packaging: fixedPackage,
-        selectionOrigin: 'FIXED',
-        analysis,
-        puid,
-        account,
-        preparedAt: nowIso(),
-      };
-      return context;
-    }
-
+    // Mesmo quando o SKU possui embalagem fixa, o operador precisa confirmar
+    // qual embalagem foi realmente usada. O mapeamento serve apenas para
+    // pré-selecionar a opção no modal — nunca para imprimir automaticamente.
     const result = await choosePackagingModal(packages, analysis, mapping);
     const context = {
       version: VERSION,
       disabled: false,
       packaging: result.selected,
-      selectionOrigin: result.saveFixed ? 'MANUAL_FIXED' : 'MANUAL',
+      selectionOrigin: fixedPackage && norm(result.selected?.id) === norm(fixedPackage.id)
+        ? 'FIXED_CONFIRMED'
+        : (result.saveFixed ? 'MANUAL_FIXED' : 'MANUAL'),
       analysis,
       puid,
       account,
