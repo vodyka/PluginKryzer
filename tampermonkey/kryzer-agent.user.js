@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.18.34
+// @version      2.18.35
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -20,8 +20,8 @@
 // @connect      image-product.upseller.cn
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/891703ad741b297816079fed979409072dbbc0df/tampermonkey/src/modules/checkout.js
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/98ea5bde196c1e82b310349ece26dfa1fe68ecb2/tampermonkey/src/modules/packaging.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/8b639f4277b38d32ec60d95cbb5a152a6b19249a/tampermonkey/src/modules/checkout.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/65f13162abe0583a9e5e200c8c738712a46833e8/tampermonkey/src/modules/packaging.js
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado-v2.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.18.3
@@ -42,6 +42,8 @@
 //
 // Ao editar um módulo, suba também o número (?v=2.18.3) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.18.35 (2026-10-07): token, cache e fila de embalagens passam a ser persistidos no Tampermonkey e no localStorage do UpSeller, com recuperação automática entre os dois.
 //
 // v2.18.34 (2026-10-07): botão Embalagens vira parte fixa do Checkout, elimina pisca-pisca e permite operar pelo cache local quando o API_TOKEN estiver vazio.
 //
