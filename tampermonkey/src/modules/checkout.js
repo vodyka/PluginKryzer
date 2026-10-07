@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.2.2';
+  const VERSION = '0.5.2.3';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4034,6 +4034,9 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
       saveReprintPending();
 
       closeHistoryModal();
+      // Libera o bloqueio antes de buscar novamente; requestOrdersRefresh ignora
+      // chamadas enquanto state.loading=true.
+      state.loading = false;
       await requestOrdersRefresh(true);
       setMessage(`✓ Pedido ${entry.orderNo || entry.orderId} voltou para o Checkout como reimpressão pendente.`, 'success');
     } catch (error) {
@@ -4138,7 +4141,8 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
                 <div><b>${escapeHtml(row.sku || '')}</b> · ${escapeHtml(row.title || '')}</div>
                 <div>${fmt(row.at)} · posição ${Number(row.batchIndex || 1)}/${Number(row.batchTotal || 1)} · ${escapeHtml(row.printer || '')}</div>
                 <div>${escapeHtml(row.trackingNumber || '')}</div>
-                ${row.reprints ? `<div class="kzqc-reprint-count">Reimpressa ${row.reprints} vez(es)</div>` : ''}
+                ${row.reprints ? `<div class="kzqc-reprint-count">Reimpressa ${row.reprints} vez(es)${row.lastReprintReason ? ` · ${escapeHtml(row.lastReprintReason)}` : ''}</div>` : ''}
+                ${row.eventType && row.eventType !== 'ORIGINAL' ? `<div class="kzqc-reprint-count">${escapeHtml(row.eventType)}${row.reprintReason ? ` · ${escapeHtml(row.reprintReason)}` : ''}</div>` : ''}
               </div>
               <div style="display:flex;gap:6px;flex-direction:column"><button class="kzqc-history-reprint" data-history-id="${escapeHtml(row.id)}">Reimprimir agora</button><button class="kzqc-history-reopen secondary" data-history-id="${escapeHtml(row.id)}">Voltar ao checkout</button></div>
             </div>`).join('') : '<div class="kzqc-empty">Nenhuma etiqueta registrada neste navegador.</div>'}
