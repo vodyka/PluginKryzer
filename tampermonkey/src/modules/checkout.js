@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.1.9';
+  const VERSION = '0.5.2.0';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -4902,7 +4902,7 @@ Isso NÃO chama mark-print novamente.`)) return;
       .kzqc-modal-actions .secondary { background:#edf1f6; color:#334155; }
       #kzqc-open-fullscreen { width:100%; border:0; border-radius:9px; padding:10px; margin-top:8px; background:#0f172a; color:#fff; font-weight:900; cursor:pointer; }
       body.kzqc-fullscreen-body { margin:0 !important; background:#f5f7fa !important; overflow:hidden !important; }
-      body.kzqc-fullscreen-body > *:not(#kzqc-panel):not(#kzqc-history-modal):not(#kzqc-order-modal):not(#kzqc-modal):not(#kzqc-image-preview) { display:none !important; }
+      body.kzqc-fullscreen-body > *:not(#kzqc-panel):not(#kzqc-history-modal):not(#kzqc-order-modal):not(#kzqc-modal):not(#kzpkg-modal):not(#kzqc-image-preview) { display:none !important; }
       #kzqc-panel.kzqc-fullscreen { position:fixed !important; inset:0 !important; width:100vw !important; height:100vh !important; max-height:none !important; border-radius:0 !important; box-shadow:none !important; z-index:2147483600 !important; background:#f5f7fa !important; }
       #kzqc-panel.kzqc-fullscreen .kzqc-header { height:64px; padding:0 32px; border-radius:0; }
       #kzqc-panel.kzqc-fullscreen .kzqc-body { width:min(1180px,calc(100vw - 48px)); height:calc(100vh - 64px); margin:0 auto; padding:24px; overflow:auto; background:#fff; box-sizing:border-box; }
