@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.5';
+  const VERSION = '0.1.6';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -673,11 +673,19 @@
     const queue = getQueue();
     const cache = getCache();
     const count = activePackaging(cache).length;
-    button.classList.toggle('active', Boolean(cfg.enabled));
-    button.innerHTML = `Embalagens <b>${cfg.enabled ? (queue.length ? queue.length + ' pend.' : count + ' cad.') : 'off'}</b>`;
-    button.title = cfg.enabled
-      ? 'Controle de embalagem ativo. Clique para configurar.'
-      : 'Controle de embalagem desligado. Clique para configurar.';
+    const isActive = Boolean(cfg.enabled);
+    const nextHtml = `Embalagens <b>${isActive ? (queue.length ? queue.length + ' pend.' : count + ' cad.') : 'off'}</b>`;
+    const nextTitle = isActive
+      ? `Controle de embalagem ativo · módulo v${VERSION}. Clique para configurar.`
+      : `Controle de embalagem desligado · módulo v${VERSION}. Clique para configurar.`;
+
+    // Evita feedback infinito do MutationObserver: só toca no DOM quando o
+    // estado visual realmente mudou.
+    if (button.classList.contains('active') !== isActive) {
+      button.classList.toggle('active', isActive);
+    }
+    if (button.innerHTML !== nextHtml) button.innerHTML = nextHtml;
+    if (button.title !== nextTitle) button.title = nextTitle;
   }
 
   function startUiObserver() {
