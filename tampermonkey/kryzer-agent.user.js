@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kryzer Agent
 // @namespace    kryzer-agent
-// @version      2.18.37
+// @version      2.18.38
 // @description  Agente único do UpSeller: liga direto os módulos de checkout, compras e alerta de venda — sem depender de nenhum backend externo pra decidir isso.
 // @match        https://app.upseller.com/*
 // @run-at       document-idle
@@ -20,8 +20,8 @@
 // @connect      image-product.upseller.cn
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/7f6ffbfbbda00c3f4e101b2849bf2109733d0179/tampermonkey/src/modules/checkout.js
-// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/7646dc270fef0cf402f18631d24dc928eb9b3b08/tampermonkey/src/modules/packaging.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/296f774a977191789d4f99cb3d6bdacb1b9c8145/tampermonkey/src/modules/checkout.js
+// @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/7e372ad236cbe100f6065323bc333981e9789f03/tampermonkey/src/modules/packaging.js
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/checkout-unificado-v2.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/compras.js?v=2.18.3
 // @require      https://raw.githubusercontent.com/vodyka/PluginKryzer/main/tampermonkey/src/modules/alerta-venda.js?v=2.18.3
@@ -42,6 +42,8 @@
 //
 // Ao editar um módulo, suba também o número (?v=2.18.3) nas linhas @require
 // abaixo — o Tampermonkey pode não rebuscar um @require se a URL não mudar.
+//
+// v2.18.38 (2026-10-07): adiciona motivos de reimpressão, reembalagem com custo só da nova embalagem e opção de voltar pedido impresso ao Checkout via mark=0.
 //
 // v2.18.37 (2026-10-07): remove o MutationObserver da sidebar, renderiza o status de Embalagens diretamente no Checkout e força o modal visível acima de qualquer CSS da página.
 //
