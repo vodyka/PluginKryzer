@@ -14,7 +14,7 @@
 function initCheckoutModule() {
   'use strict';
 
-  const VERSION = '0.5.2.1';
+  const VERSION = '0.5.2.2';
   // false = desativa Pedidos anormais; true = ativa novamente.
   const ENABLE_ABNORMAL_ORDERS = false;
   // Preencher com a URL pública da logo real da Kryzer para trocar o "K" azul do
@@ -46,6 +46,7 @@ function initCheckoutModule() {
   const PRINT_OWNER_TTL_MS = 8000;
   const STORAGE_LAST_PRINTED = 'kz_quick_checkout_last_printed_v1';
   const STORAGE_PRINT_HISTORY = 'kz_quick_checkout_print_history_v1';
+  const STORAGE_REPRINT_PENDING = 'kz_quick_checkout_reprint_pending_v1';
   const STORAGE_ABNORMAL = 'kz_quick_checkout_abnormal_v1';
   const STORAGE_ABNORMAL_REASONS = 'kz_quick_checkout_abnormal_reasons_v1';
   const STORAGE_SKU_FILTERS = 'kz_quick_checkout_sku_filters_v1';
@@ -104,6 +105,7 @@ const STORAGE_STOCK_SHORTAGES = 'kz_quick_checkout_stock_shortages_v1';
     flightSessionId: localStorage.getItem(STORAGE_FLIGHT_SESSION) || '',
     lastPrinted: readJson(STORAGE_LAST_PRINTED, null),
     printHistory: readJson(STORAGE_PRINT_HISTORY, []),
+    reprintPending: readJson(STORAGE_REPRINT_PENDING, {}),
     analysisFailures: 0,
     pluginPuid: 0,
     pluginStatus: 'desconectado',
@@ -3894,40 +3896,216 @@ stockShortages: readJson(STORAGE_STOCK_SHORTAGES, {}),
     saveJson(STORAGE_PRINT_HISTORY, state.printHistory);
   }
 
+  const REPRINT_REASONS = [
+    { code: 'label_torn', label: 'Etiqueta rasgou', requiresPackaging: false },
+    { code: 'label_misapplied', label: 'Etiqueta colou errado', requiresPackaging: false },
+    { code: 'printer_failure', label: 'Falha da impressora', requiresPackaging: false },
+    { code: 'wrong_packaging', label: 'Embalagem errada', requiresPackaging: true },
+    { code: 'wrong_quantity', label: 'Quantidade errada dentro da embalagem', requiresPackaging: true },
+    { code: 'wrong_product', label: 'Produto errado dentro da embalagem', requiresPackaging: true },
+    { code: 'damaged_packaging', label: 'Embalagem danificada', requiresPackaging: true },
+    { code: 'other_label', label: 'Outro — somente etiqueta', requiresPackaging: false },
+    { code: 'other_package', label: 'Outro — precisou trocar embalagem', requiresPackaging: true },
+  ];
+
+  function saveReprintPending() {
+    saveJson(STORAGE_REPRINT_PENDING, state.reprintPending || {});
+  }
+
+  function historyEntryAsOrder(entry) {
+    const fallbackSku = norm(entry?.sku);
+    return {
+      idStr: norm(entry?.orderId),
+      orderNo: norm(entry?.orderNo),
+      authIdStr: norm(entry?.authIdStr),
+      trackingNumber: norm(entry?.trackingNumber),
+      shopName: norm(entry?.shopName),
+      channel: norm(entry?.channel),
+      category: norm(entry?.category || 'single1'),
+      title: norm(entry?.title),
+      image: norm(entry?.image),
+      realItems: Array.isArray(entry?.realItems) && entry.realItems.length
+        ? entry.realItems
+        : (fallbackSku ? [{ sku: fallbackSku, title: norm(entry?.title), qty: 1 }] : []),
+      totalQty: Number(entry?.totalQty || 1),
+    };
+  }
+
+  function chooseReprintReason(orderLabel) {
+    document.getElementById('kzqc-modal')?.remove();
+    return new Promise((resolve, reject) => {
+      const modal = document.createElement('div');
+      modal.id = 'kzqc-modal';
+      modal.innerHTML = `
+        <div class="kzqc-modal-card">
+          <div class="kzqc-modal-title">Motivo da reimpressão</div>
+          <div class="kzqc-modal-subtitle">Pedido <b>${escapeHtml(orderLabel || '')}</b>. Escolha o que aconteceu para o custo ficar correto.</div>
+          <div style="display:grid;gap:8px;margin-top:14px">
+            ${REPRINT_REASONS.map((reason, index) => `
+              <label style="display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;background:#fff">
+                <input type="radio" name="kzqc-reprint-reason" value="${escapeHtml(reason.code)}" ${index===0?'checked':''} style="margin-top:2px">
+                <span><b>${escapeHtml(reason.label)}</b><small style="display:block;color:#64748b;margin-top:2px">${reason.requiresPackaging ? 'Vai registrar e cobrar uma nova embalagem.' : 'Não cobra nova embalagem nem nova operação.'}</small></span>
+              </label>
+            `).join('')}
+          </div>
+          <div class="kzqc-modal-actions">
+            <button id="kzqc-reprint-cancel" class="secondary">Cancelar</button>
+            <button id="kzqc-reprint-confirm" class="primary">Continuar</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+
+      const closeWithCancel = () => {
+        modal.remove();
+        reject(new Error('Reimpressão cancelada.'));
+      };
+      modal.querySelector('#kzqc-reprint-cancel').onclick = closeWithCancel;
+      modal.addEventListener('click', event => { if (event.target === modal) closeWithCancel(); });
+      modal.querySelector('#kzqc-reprint-confirm').onclick = () => {
+        const code = modal.querySelector('input[name="kzqc-reprint-reason"]:checked')?.value;
+        const reason = REPRINT_REASONS.find(item => item.code === code);
+        if (!reason) return;
+        modal.remove();
+        resolve(reason);
+      };
+    });
+  }
+
+  async function unmarkOrdersForReprint(orderIds) {
+    const ids = [...new Set((orderIds || []).map(norm).filter(Boolean))];
+    if (!ids.length) return { ok: false, failedIds: [] };
+
+    const body = new URLSearchParams();
+    body.set('isBatch', '0');
+    body.set('mark', '0');
+    body.set('markType', '0');
+    ids.forEach((id, index) => body.append(`orderIdList[${index}]`, id));
+
+    try {
+      const result = await postForm('/api/order/mark-print', body);
+      if (isSuccess(result.json)) return { ok: true, failedIds: [] };
+    } catch (error) {
+      console.warn('[KZ Checkout] desmarcar impressão em lote:', error);
+    }
+
+    const failedIds = [];
+    for (const id of ids) {
+      try {
+        const one = new URLSearchParams();
+        one.set('isBatch', '0');
+        one.set('mark', '0');
+        one.set('markType', '0');
+        one.append('orderIdList[0]', id);
+        const result = await postForm('/api/order/mark-print', one);
+        if (!isSuccess(result.json)) failedIds.push(id);
+      } catch {
+        failedIds.push(id);
+      }
+    }
+    return { ok: failedIds.length === 0, failedIds };
+  }
+
+  async function reopenHistoryEntry(historyId) {
+    if (state.loading) return;
+    const entry = (state.printHistory || []).find(row => row.id === historyId);
+    if (!entry) return setMessage('Pedido não encontrado no histórico.', 'error');
+
+    let reason;
+    try {
+      reason = await chooseReprintReason(entry.orderNo || entry.orderId);
+    } catch {
+      return;
+    }
+
+    state.loading = true;
+    setMessage(`Reabrindo o pedido ${entry.orderNo || entry.orderId} no Checkout...`, 'info');
+    scheduleRender();
+    try {
+      const result = await unmarkOrdersForReprint([entry.orderId]);
+      if (!result.ok) throw new Error('Não consegui marcar a etiqueta como não impressa no UpSeller.');
+
+      state.reprintPending = state.reprintPending || {};
+      state.reprintPending[norm(entry.orderId)] = {
+        reasonCode: reason.code,
+        reasonLabel: reason.label,
+        requiresPackaging: Boolean(reason.requiresPackaging),
+        createdAt: new Date().toISOString(),
+      };
+      saveReprintPending();
+
+      closeHistoryModal();
+      await requestOrdersRefresh(true);
+      setMessage(`✓ Pedido ${entry.orderNo || entry.orderId} voltou para o Checkout como reimpressão pendente.`, 'success');
+    } catch (error) {
+      setMessage(error?.message || String(error), 'error');
+    } finally {
+      state.loading = false;
+      scheduleRender();
+      setTimeout(focusScanner, 40);
+    }
+  }
+
   async function reprintHistoryEntry(historyId) {
     if (state.loading) return;
     const entry = (state.printHistory || []).find(row => row.id === historyId);
     if (!entry) return setMessage('Pedido não encontrado no histórico.', 'error');
     if (!state.agentOnline || !state.printer) return setMessage('Conecte o UpSeller Print Plugin e selecione a impressora.', 'error');
-    if (!confirm(`Reimprimir somente o pedido ${entry.orderNo || entry.orderId}?
 
-Isso NÃO chama mark-print novamente.`)) return;
+    let reason;
+    try {
+      reason = await chooseReprintReason(entry.orderNo || entry.orderId);
+    } catch {
+      return;
+    }
+
+    const packagingApi = globalThis.KryzerPackaging;
+    if (!packagingApi?.prepareReprint || !packagingApi?.recordSuccessfulPrints) {
+      return setMessage('Módulo de embalagens sem suporte à reimpressão. Atualize o Kryzer Agent.', 'error');
+    }
+
+    const order = historyEntryAsOrder(entry);
+    let reprintContext;
+    try {
+      setMessage(reason.requiresPackaging ? 'Selecionando nova embalagem da reimpressão...' : 'Preparando reimpressão sem nova embalagem...', 'info');
+      const currentPuid = Number(state.pluginPuid || 0);
+      reprintContext = await packagingApi.prepareReprint({
+        orders: [order],
+        puid: currentPuid,
+        reasonCode: reason.code,
+        reasonLabel: reason.label,
+        requiresPackaging: reason.requiresPackaging,
+        checkoutVersion: VERSION,
+      });
+    } catch (error) {
+      return setMessage(error?.message || String(error), /cancelad/i.test(error?.message || '') ? 'warn' : 'error');
+    }
 
     state.loading = true;
     setMessage(`Reimprimindo ${entry.orderNo || entry.orderId}...`, 'info');
     scheduleRender();
     try {
-      const order = {
-        idStr: entry.orderId,
-        orderNo: entry.orderNo,
-        authIdStr: entry.authIdStr,
-        trackingNumber: entry.trackingNumber,
-      };
       const result = await printOrdersWithPlugin([order], 60000, { autoMark: false });
       if (!result.success.length) throw new Error(result.errors[0]?.detail?.errorMsg || 'O plugin não confirmou a reimpressão.');
+
+      Promise.resolve(packagingApi.recordSuccessfulPrints({
+        successfulOrders: [order],
+        context: reprintContext,
+        checkoutVersion: VERSION,
+        printer: state.printer,
+      })).catch(error => console.warn('[KZ Checkout] registro da reimpressão:', error));
+
       entry.reprints = Number(entry.reprints || 0) + 1;
       entry.lastReprintedAt = new Date().toISOString();
+      entry.lastReprintReason = reason.label;
       saveJson(STORAGE_PRINT_HISTORY, state.printHistory);
-      setMessage(`✓ Pedido ${entry.orderNo || entry.orderId} reimpresso.`, 'success');
+      setMessage(`✓ Pedido ${entry.orderNo || entry.orderId} reimpresso · ${reason.label}.`, 'success');
       closeHistoryModal();
       showHistoryModal();
     } catch (error) {
       console.error('[KZ Checkout] reimpressão:', error);
       setMessage(error.message || String(error), 'error');
     } finally {
-      flightLog('execute_print_finally_before_unlock', {}, 'info', true);
       state.loading = false;
-      flightLog('execute_print_unlocked', {}, 'info', true);
       scheduleRender();
     }
   }
@@ -3962,7 +4140,7 @@ Isso NÃO chama mark-print novamente.`)) return;
                 <div>${escapeHtml(row.trackingNumber || '')}</div>
                 ${row.reprints ? `<div class="kzqc-reprint-count">Reimpressa ${row.reprints} vez(es)</div>` : ''}
               </div>
-              <button class="kzqc-history-reprint" data-history-id="${escapeHtml(row.id)}">Imprimir este pedido</button>
+              <div style="display:flex;gap:6px;flex-direction:column"><button class="kzqc-history-reprint" data-history-id="${escapeHtml(row.id)}">Reimprimir agora</button><button class="kzqc-history-reopen secondary" data-history-id="${escapeHtml(row.id)}">Voltar ao checkout</button></div>
             </div>`).join('') : '<div class="kzqc-empty">Nenhuma etiqueta registrada neste navegador.</div>'}
         </div>
       </div>`;
@@ -3971,6 +4149,9 @@ Isso NÃO chama mark-print novamente.`)) return;
     modal.addEventListener('click', event => { if (event.target === modal) closeHistoryModal(); });
     modal.querySelectorAll('.kzqc-history-reprint').forEach(button => {
       button.onclick = () => reprintHistoryEntry(button.dataset.historyId);
+    });
+    modal.querySelectorAll('.kzqc-history-reopen').forEach(button => {
+      button.onclick = () => reopenHistoryEntry(button.dataset.historyId);
     });
   }
 
@@ -4027,13 +4208,37 @@ Isso NÃO chama mark-print novamente.`)) return;
           });
         }
 
-        packagingContext = await packagingApi.preparePrint({
-          orders: selectedOrders,
-          group,
-          puid: currentPuid,
-          printer: state.printer,
-          checkoutVersion: VERSION,
-        });
+        const pendingEntries = selectedOrders
+          .map(order => ({ order, intent: state.reprintPending?.[norm(order?.idStr)] || null }))
+          .filter(row => row.intent);
+
+        if (pendingEntries.length) {
+          if (selectedOrders.length !== 1 || pendingEntries.length !== 1) {
+            throw new Error('Pedido em reimpressão pendente deve ser processado individualmente.');
+          }
+          const intent = pendingEntries[0].intent;
+          if (!packagingApi?.prepareReprint) {
+            throw new Error('Módulo de embalagens sem suporte à reimpressão.');
+          }
+          packagingContext = await packagingApi.prepareReprint({
+            orders: selectedOrders,
+            group,
+            puid: currentPuid,
+            printer: state.printer,
+            checkoutVersion: VERSION,
+            reasonCode: intent.reasonCode,
+            reasonLabel: intent.reasonLabel,
+            requiresPackaging: Boolean(intent.requiresPackaging),
+          });
+        } else {
+          packagingContext = await packagingApi.preparePrint({
+            orders: selectedOrders,
+            group,
+            puid: currentPuid,
+            printer: state.printer,
+            checkoutVersion: VERSION,
+          });
+        }
       } catch (error) {
         const message = error?.message || String(error);
         setMessage(message, /cancelad/i.test(message) ? 'warn' : 'error');
@@ -4101,8 +4306,20 @@ Isso NÃO chama mark-print novamente.`)) return;
           batchTotal: selectedOrders.length,
           at: now,
           reprints: 0,
+          eventType: packagingContext?.eventType || 'ORIGINAL',
+          reprintReason: packagingContext?.reprintReasonLabel || '',
+          shopName: order.shopName || '',
+          channel: order.channel || '',
+          category: order.category || '',
+          realItems: Array.isArray(order.realItems) ? order.realItems : [],
+          totalQty: Number(order.totalQty || 1),
         });
+
+        if (packagingContext?.eventType && packagingContext.eventType !== 'ORIGINAL') {
+          delete state.reprintPending?.[norm(order.idStr)];
+        }
       });
+      saveReprintPending();
 
       if (successfulOrders.length) {
         const last = successfulOrders[successfulOrders.length - 1];
