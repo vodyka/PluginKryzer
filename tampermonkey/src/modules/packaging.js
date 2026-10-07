@@ -8,7 +8,7 @@
 
   if (globalThis.KryzerPackaging) return;
 
-  const VERSION = '0.1.8';
+  const VERSION = '0.1.9';
   const API_URL = 'https://script.google.com/macros/s/AKfycbyLfRSbW_MwqOP-6vNQRO-hpJ9rFEQdvm_lxO2dsEpYGLtC390Vrq_JwItCIL1BlAzY8A/exec';
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Je79NTOUZEEwC7FE9P5bapuuZme76vwM_E7jDg-a8dI/edit';
   const PACKAGING_GID = '1120907586';
@@ -17,6 +17,9 @@
   const KEY_CONFIG = 'kz_packaging_config_v1';
   const KEY_CACHE = 'kz_packaging_bootstrap_cache_v1';
   const KEY_QUEUE = 'kz_packaging_sync_queue_v1';
+  const LS_CONFIG = 'kz_packaging_config_backup_v1';
+  const LS_CACHE = 'kz_packaging_cache_backup_v1';
+  const LS_QUEUE = 'kz_packaging_queue_backup_v1';
   const CACHE_TTL_MS = 5 * 60 * 1000;
   const MAX_QUEUE = 3000;
 
@@ -81,29 +84,57 @@
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'
   })[ch]);
 
-  function getConfig() {
+  function readLocalJson(key, fallback = null) {
     try {
-      const value = GM_getValue(KEY_CONFIG, DEFAULT_CONFIG);
-      return { ...DEFAULT_CONFIG, ...(value || {}), endpoint: API_URL };
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
     } catch {
-      return { ...DEFAULT_CONFIG };
+      return fallback;
     }
+  }
+
+  function writeLocalJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function getConfig() {
+    let gmValue = null;
+    try { gmValue = GM_getValue(KEY_CONFIG, null); } catch {}
+    const localValue = readLocalJson(LS_CONFIG, null);
+    const candidate = gmValue && typeof gmValue === 'object' && norm(gmValue.token)
+      ? gmValue
+      : (localValue && typeof localValue === 'object' ? localValue : gmValue);
+    const value = { ...DEFAULT_CONFIG, ...(candidate || {}), endpoint: API_URL };
+
+    // Auto-recupera um lado a partir do outro.
+    try { GM_setValue(KEY_CONFIG, value); } catch {}
+    writeLocalJson(LS_CONFIG, value);
+    return value;
   }
 
   function saveConfig(next) {
     const value = { ...getConfig(), ...(next || {}), endpoint: API_URL };
-    GM_setValue(KEY_CONFIG, value);
+    try { GM_setValue(KEY_CONFIG, value); } catch {}
+    writeLocalJson(LS_CONFIG, value);
     updateSidebarButton();
     return value;
   }
 
   function getCache() {
-    try {
-      const value = GM_getValue(KEY_CACHE, null);
-      return value && typeof value === 'object' ? value : null;
-    } catch {
-      return null;
+    let gmValue = null;
+    try { gmValue = GM_getValue(KEY_CACHE, null); } catch {}
+    const localValue = readLocalJson(LS_CACHE, null);
+
+    const gmCount = Array.isArray(gmValue?.packaging) ? gmValue.packaging.length : 0;
+    const localCount = Array.isArray(localValue?.packaging) ? localValue.packaging.length : 0;
+    const value = localCount > gmCount ? localValue : (gmValue || localValue);
+
+    if (value && typeof value === 'object') {
+      try { GM_setValue(KEY_CACHE, value); } catch {}
+      writeLocalJson(LS_CACHE, value);
+      return value;
     }
+    return null;
   }
 
   function saveCache(data) {
@@ -114,22 +145,28 @@
       skuMappings: Array.isArray(data?.skuMappings) ? data.skuMappings : [],
       accounts: Array.isArray(data?.accounts) ? data.accounts : [],
     };
-    GM_setValue(KEY_CACHE, value);
+    try { GM_setValue(KEY_CACHE, value); } catch {}
+    writeLocalJson(LS_CACHE, value);
     updateSidebarButton();
     return value;
   }
 
   function getQueue() {
-    try {
-      const value = GM_getValue(KEY_QUEUE, []);
-      return Array.isArray(value) ? value : [];
-    } catch {
-      return [];
-    }
+    let gmValue = [];
+    try { gmValue = GM_getValue(KEY_QUEUE, []); } catch {}
+    const localValue = readLocalJson(LS_QUEUE, []);
+    const value = Array.isArray(gmValue) && gmValue.length >= (Array.isArray(localValue) ? localValue.length : 0)
+      ? gmValue
+      : (Array.isArray(localValue) ? localValue : []);
+    try { GM_setValue(KEY_QUEUE, value); } catch {}
+    writeLocalJson(LS_QUEUE, value);
+    return value;
   }
 
   function saveQueue(queue) {
-    GM_setValue(KEY_QUEUE, (queue || []).slice(-MAX_QUEUE));
+    const value = (queue || []).slice(-MAX_QUEUE);
+    try { GM_setValue(KEY_QUEUE, value); } catch {}
+    writeLocalJson(LS_QUEUE, value);
     updateSidebarButton();
   }
 
